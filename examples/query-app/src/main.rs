@@ -8,6 +8,8 @@ actions!(gpui_graph, [Quit]);
 fn main() {
     gpui_platform::application().run(|cx: &mut App| {
         gpui_base::init(cx);
+        gpui_graph::init(cx);
+        app::init(cx);
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_window_closed(|cx, _| {

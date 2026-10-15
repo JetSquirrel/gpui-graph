@@ -2,7 +2,12 @@
 //! centering forces, integrated with velocity Verlet and an annealing `alpha`.
 
 /// Tuning knobs, named after their d3-force counterparts.
+///
+/// ```ignore
+/// ForceConfig::default().with_link_distance(90.).with_charge(-400.)
+/// ```
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct ForceConfig {
     /// `forceLink().distance()`: rest length of an edge, in world units.
     pub link_distance: f32,
@@ -41,6 +46,41 @@ impl Default for ForceConfig {
             alpha_min,
             alpha_decay: 1. - alpha_min.powf(1. / 300.),
         }
+    }
+}
+
+macro_rules! with_fields {
+    ($ty:ty { $($field:ident: $t:ty => $with:ident),* $(,)? }) => {
+        impl $ty {
+            $(
+                pub fn $with(mut self, value: $t) -> Self {
+                    self.$field = value;
+                    self
+                }
+            )*
+        }
+    };
+}
+pub(crate) use with_fields;
+
+with_fields!(ForceConfig {
+    link_distance: f32 => with_link_distance,
+    charge: f32 => with_charge,
+    theta: f32 => with_theta,
+    charge_distance_max: f32 => with_charge_distance_max,
+    collide_padding: f32 => with_collide_padding,
+    collide_strength: f32 => with_collide_strength,
+    gravity: f32 => with_gravity,
+    group_strength: f32 => with_group_strength,
+    velocity_decay: f32 => with_velocity_decay,
+});
+
+impl ForceConfig {
+    /// Sets `alpha_min` and derives `alpha_decay` so the layout settles in about `ticks` steps.
+    pub fn with_settle_ticks(mut self, ticks: u32, alpha_min: f32) -> Self {
+        self.alpha_min = alpha_min;
+        self.alpha_decay = 1. - alpha_min.powf(1. / ticks.max(1) as f32);
+        self
     }
 }
 

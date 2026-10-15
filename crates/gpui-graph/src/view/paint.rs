@@ -7,7 +7,7 @@ use gpui::{
 use super::visual::Vertex;
 use super::{Item, NetworkGraph};
 use crate::geometry::{circles_hull, draw_self_loop, segment_may_intersect, smooth_closed};
-use crate::style::{GraphColors, LabelMode};
+use crate::style::{GraphColors, GraphMetrics, LabelMode};
 
 #[derive(Clone, Copy, PartialEq)]
 enum EdgeState {
@@ -18,14 +18,22 @@ enum EdgeState {
 }
 
 impl NetworkGraph {
-    fn vertex_color(&self, v: usize) -> Hsla {
+    fn vertex_color(&self, v: usize, cx: &App) -> Hsla {
         match self.vis.vertices[v] {
-            Vertex::Node(i) => self.color_of(&self.nodes[i]),
+            Vertex::Node(i) => self.color_of(&self.nodes[i], cx),
             Vertex::Group(g) => self.group_color(g),
         }
     }
 
-    pub(super) fn paint_graph(&self, bounds: Bounds<Pixels>, colors: &GraphColors, window: &mut Window, cx: &mut App) {
+    pub(super) fn paint_graph(
+        &self,
+        bounds: Bounds<Pixels>,
+        colors: &GraphColors,
+        metrics: &GraphMetrics,
+        show_focus: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let zoom = self.zoom;
         let selected = self.selected_item();
         let focus = self.hovered.or(selected);
@@ -37,8 +45,8 @@ impl NetworkGraph {
         };
         let visible = bounds.dilate(px(40.));
 
-        if self.show_group_hulls {
-            self.paint_hulls(focus.is_some(), window, cx);
+        if self.group_hulls {
+            self.paint_hulls(focus.is_some(), metrics, window, cx);
         }
 
         // Edges are batched into one path per state to keep draw calls low;
@@ -88,14 +96,14 @@ impl NetworkGraph {
                 draw_self_loop(path, a, rs);
             } else {
                 let arrow = (6. + stroke * 2.) * width_scale.sqrt();
-                let gap = if self.show_arrows { rt + arrow } else { rt };
+                let gap = if self.arrows { rt + arrow } else { rt };
                 path.move_to(geom.point_from_start(rs));
                 let end = geom.point_from_end(gap);
                 match geom.ctrl {
                     Some(ctrl) => path.curve_to(end, ctrl),
                     None => path.line_to(end),
                 }
-                if self.show_arrows && zoom > 0.25 {
+                if self.arrows && zoom > 0.25 {
                     let tip = geom.point_from_end(rt);
                     let (dx, dy) = geom.end_direction();
                     let (nx, ny) = (-dy * arrow * 0.45, dx * arrow * 0.45);
@@ -113,7 +121,7 @@ impl NetworkGraph {
             } else {
                 self.edges[e.edges[0]].data.label.clone()
             };
-            let label_visible = self.show_edge_labels
+            let label_visible = self.edge_labels
                 && !text.is_empty()
                 && e.source != e.target
                 && (emphasized || (state == EdgeState::Normal && (zoom >= 1.1 || (count > 1 && zoom >= 0.4))));
@@ -141,13 +149,14 @@ impl NetworkGraph {
             }
         }
 
+        let caption = &metrics.caption;
         for (pos, text, active) in edge_labels {
             let color = if active { colors.foreground } else { colors.muted };
-            let line = shape(&text, px(11.), color, window);
-            let w = line.width;
-            let chip = Bounds::new(point(pos.x - w / 2. - px(3.), pos.y - px(8.)), size(w + px(6.), px(16.)));
-            window.paint_quad(gpui::fill(chip, colors.background.opacity(0.85)).corner_radii(px(3.)));
-            let _ = line.paint(point(pos.x - w / 2., pos.y - px(7.)), px(14.), TextAlign::Left, None, window, cx);
+            let line = shape(&text, caption.size, color, window);
+            let (w, h, pad) = (line.width, caption.line_height, metrics.space_xs);
+            let chip = Bounds::new(point(pos.x - w / 2. - pad, pos.y - h / 2.), size(w + pad * 2., h));
+            window.paint_quad(gpui::fill(chip, colors.background.opacity(0.85)).corner_radii(metrics.radius_sm));
+            let _ = line.paint(point(pos.x - w / 2., pos.y - h / 2.), h, TextAlign::Left, None, window, cx);
         }
 
         // Vertices, then labels above all of them.
@@ -158,7 +167,7 @@ impl NetworkGraph {
             if !visible.contains(&c) && r < 200. {
                 continue;
             }
-            let base = self.vertex_color(v);
+            let base = self.vertex_color(v, cx);
             let faded = !in_focus(v);
             let is_selected = selected == Some(Item::Vertex(v));
             let is_hovered = self.hovered == Some(Item::Vertex(v));
@@ -185,12 +194,18 @@ impl NetworkGraph {
             };
             let fill = if faded { base.opacity(0.2) } else { base };
             window.paint_quad(quad(circle(c, rr), px(rr), fill, px(ring), border, BorderStyle::Solid));
+            if show_focus && is_selected {
+                // Keyboard focus gets its own ring outside the selection ring.
+                let f = rr + if is_group { 7. } else { 4. };
+                window.paint_quad(quad(circle(c, f), px(f), gpui::transparent_black(), px(2.), colors.focus_ring, BorderStyle::Solid));
+            }
 
             match vis.vertices[v] {
                 Vertex::Group(g) if rr > 8. => {
                     let text: SharedString = self.groups[g].members.len().to_string().into();
                     let font = px((rr * 0.6).clamp(9., 18.));
-                    let line = shape(&text, font, gpui::white().opacity(if faded { 0.4 } else { 1. }), window);
+                    let on_fill = colors.on_fill(base).opacity(if faded { 0.4 } else { 1. });
+                    let line = shape(&text, font, on_fill, window);
                     let origin = point(c.x - line.width / 2., c.y - font * 0.6);
                     let _ = line.paint(origin, font * 1.2, TextAlign::Left, None, window, cx);
                 }
@@ -218,7 +233,9 @@ impl NetworkGraph {
             }
         }
 
-        let font_size = px((12. * zoom.sqrt()).clamp(10., 14.));
+        // Labels follow the theme's type scale, growing slightly with zoom.
+        let font_size = (metrics.label.size * zoom.sqrt()).max(metrics.caption.size).min(metrics.label.size * 1.2);
+        let line_height = font_size * (metrics.label.line_height / metrics.label.size);
         for (c, r, text, faded, strong) in labels {
             let text = truncate(&text, 24);
             let color = if faded {
@@ -229,17 +246,24 @@ impl NetworkGraph {
                 colors.muted
             };
             let line = shape(&text, font_size, color, window);
-            let origin = point(c.x - line.width / 2., c.y + px(r) + px(3.));
+            let origin = point(c.x - line.width / 2., c.y + px(r) + metrics.space_xs);
             if strong && !faded {
-                let chip = Bounds::new(origin - point(px(4.), px(1.)), size(line.width + px(8.), font_size + px(4.)));
-                window.paint_quad(gpui::fill(chip, colors.background.opacity(0.9)).corner_radii(px(3.)));
+                let pad = metrics.space_xs;
+                let chip = Bounds::new(origin - point(pad, px(0.)), size(line.width + pad * 2., line_height));
+                window.paint_quad(gpui::fill(chip, colors.background.opacity(0.9)).corner_radii(metrics.radius_sm));
             }
-            let _ = line.paint(origin, font_size + px(2.), TextAlign::Left, None, window, cx);
+            let _ = line.paint(origin, line_height, TextAlign::Left, None, window, cx);
+        }
+
+        if show_focus {
+            // Focus-visible ring for the graph itself, inset so ancestors cannot clip it.
+            let ring = Bounds::new(bounds.origin + point(px(1.), px(1.)), bounds.size - size(px(2.), px(2.)));
+            window.paint_quad(quad(ring, metrics.radius_sm, gpui::transparent_black(), px(2.), colors.focus_ring, BorderStyle::Solid));
         }
     }
 
     /// Rounded convex hulls behind each expanded group with two or more visible members.
-    fn paint_hulls(&self, dimmed: bool, window: &mut Window, cx: &mut App) {
+    fn paint_hulls(&self, dimmed: bool, metrics: &GraphMetrics, window: &mut Window, cx: &mut App) {
         let zoom = self.zoom;
         let padding = (14. * zoom.sqrt()).clamp(6., 20.);
         for (members, &g) in self.vis.clusters.iter().zip(&self.vis.cluster_groups) {
@@ -270,35 +294,43 @@ impl NetworkGraph {
             if self.label_mode != LabelMode::Never {
                 let top = hull.iter().copied().fold((0., f32::MAX), |best, p| if p.1 < best.1 { p } else { best });
                 let text = truncate(&self.groups[g].label, 32);
-                let line = shape(&text, px(12.), color.opacity(if dimmed { 0.4 } else { 0.9 }), window);
-                let origin = point(px(top.0) - line.width / 2., px(top.1 - 18.));
-                let _ = line.paint(origin, px(14.), TextAlign::Left, None, window, cx);
+                let caption = &metrics.caption;
+                let line = shape(&text, caption.size, color.opacity(if dimmed { 0.4 } else { 0.9 }), window);
+                let origin = point(px(top.0) - line.width / 2., px(top.1) - caption.line_height - metrics.space_xs);
+                let _ = line.paint(origin, caption.line_height, TextAlign::Left, None, window, cx);
             }
         }
     }
 
-    pub(super) fn tooltip_element(&self, colors: &GraphColors, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
-        if !self.show_tooltip || self.drag.as_ref().is_some_and(|d| d.moved) {
+    pub(super) fn tooltip_element(
+        &self,
+        colors: &GraphColors,
+        metrics: &GraphMetrics,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        if !self.tooltips || self.drag.as_ref().is_some_and(|d| d.moved) {
             return None;
         }
         let item = self.hovered?;
         let pointer = self.pointer?;
         let content = match &self.tooltip {
             Some(builder) => builder(&self.item_selection(item), colors, window, cx)?,
-            None => self.default_tooltip(item, colors).into_any_element(),
+            None => self.default_tooltip(item, colors, metrics, cx).into_any_element(),
         };
         let origin = self.bounds.get().origin;
+        let offset = metrics.space_md;
         Some(
             div()
                 .absolute()
-                .left(pointer.x - origin.x + px(14.))
-                .top(pointer.y - origin.y + px(14.))
+                .left(pointer.x - origin.x + offset)
+                .top(pointer.y - origin.y + offset)
                 .child(content)
                 .into_any_element(),
         )
     }
 
-    fn default_tooltip(&self, item: Item, colors: &GraphColors) -> impl IntoElement {
+    fn default_tooltip(&self, item: Item, colors: &GraphColors, metrics: &GraphMetrics, cx: &App) -> impl IntoElement {
         let (swatch, kicker, title, detail): (Option<Hsla>, SharedString, SharedString, String) = match item {
             Item::Vertex(v) => match self.vis.vertices[v] {
                 Vertex::Node(i) => {
@@ -307,13 +339,13 @@ impl NetworkGraph {
                     if let Some(g) = self.node_group[i] {
                         kicker = format!("{kicker} · {}", self.groups[g].label);
                     }
-                    (Some(self.vertex_color(v)), kicker.into(), node.label.clone(), format!("{} relationships", self.degrees[i]))
+                    (Some(self.vertex_color(v, cx)), kicker.into(), node.label.clone(), format!("{} relationships", self.degrees[i]))
                 }
                 Vertex::Group(g) => (
                     Some(self.group_color(g)),
                     "Group".into(),
                     self.groups[g].label.clone(),
-                    format!("{} members · double-click to expand", self.groups[g].members.len()),
+                    format!("{} members", self.groups[g].members.len()),
                 ),
             },
             Item::Edge(e) => {
@@ -331,15 +363,16 @@ impl NetworkGraph {
             }
         };
         div()
-            .max_w(px(280.))
-            .px_2()
-            .py_1p5()
-            .rounded_md()
+            .max_w_72()
+            .px(metrics.space_sm)
+            .py(metrics.space_xs)
+            .rounded(metrics.radius_md)
             .border_1()
             .border_color(colors.border)
             .bg(colors.surface)
-            .shadow_md()
-            .text_xs()
+            .shadow(metrics.shadow.clone())
+            .text_size(metrics.caption.size)
+            .line_height(metrics.caption.line_height)
             .text_color(colors.foreground)
             .flex()
             .flex_col()

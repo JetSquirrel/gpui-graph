@@ -49,9 +49,9 @@ impl MemorySource {
                 }
             }
         }
-        GraphData {
-            nodes: self.data.nodes.iter().filter(|n| seen.contains(n.id.as_ref())).cloned().collect(),
-            edges: self
+        GraphData::new(
+            self.data.nodes.iter().filter(|n| seen.contains(n.id.as_ref())).cloned().collect(),
+            self
                 .data
                 .edges
                 .iter()
@@ -61,7 +61,7 @@ impl MemorySource {
                 })
                 .map(|(_, e)| e.clone())
                 .collect(),
-        }
+        )
     }
 }
 

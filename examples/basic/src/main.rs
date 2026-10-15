@@ -2,13 +2,14 @@
 
 use gpui::{
     App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
-    Window, WindowBounds, WindowOptions, div, px, size,
+    Subscription, Window, WindowBounds, WindowOptions, div, px, size,
 };
-use gpui_graph::{Edge, GraphData, GraphEvent, NetworkGraph, Node, Selection};
+use gpui_graph::{Edge, GraphData, NetworkGraph, NetworkGraphEvent, Node, Selection};
 
 struct Example {
     graph: Entity<NetworkGraph>,
     selected: String,
+    _subscription: Subscription,
 }
 
 impl Example {
@@ -29,8 +30,8 @@ impl Example {
             Edge::new("acme", "globex", "COMPETES_WITH"),
         ];
         let graph = cx.new(|cx| NetworkGraph::new(cx).with_data(GraphData::new(nodes, edges)));
-        cx.subscribe(&graph, |this, _, event: &GraphEvent, cx| {
-            if let GraphEvent::SelectionChanged(selection) = event {
+        let subscription = cx.subscribe(&graph, |this, _, event: &NetworkGraphEvent, cx| {
+            if let NetworkGraphEvent::SelectionChanged(selection) = event {
                 this.selected = match selection {
                     Selection::None => "nothing".into(),
                     Selection::Node(n) => format!("node {}", n.label),
@@ -39,9 +40,8 @@ impl Example {
                 };
                 cx.notify();
             }
-        })
-        .detach();
-        Self { graph, selected: "nothing".into() }
+        });
+        Self { graph, selected: "nothing".into(), _subscription: subscription }
     }
 }
 
@@ -59,6 +59,7 @@ impl Render for Example {
 fn main() {
     gpui_platform::application().run(|cx: &mut App| {
         gpui_base::init(cx);
+        gpui_graph::init(cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(800.), px(600.)), cx)),
             ..Default::default()

@@ -1,7 +1,8 @@
 use gpui::{Hsla, SharedString};
 
-/// A vertex in the graph.
+/// A vertex in the graph. Build with [`Node::new`] and the builder methods.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Node {
     /// Unique id; edges refer to nodes by this.
     pub id: SharedString,
@@ -61,6 +62,7 @@ impl Node {
 
 /// A directed relationship between two nodes. Parallel edges and self-loops are allowed.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Edge {
     pub source: SharedString,
     pub target: SharedString,
@@ -91,6 +93,7 @@ impl Edge {
 
 /// A batch of nodes and edges, as returned by a query.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct GraphData {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,

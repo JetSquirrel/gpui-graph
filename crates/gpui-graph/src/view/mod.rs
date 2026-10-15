@@ -3,17 +3,25 @@ mod visual;
 
 use std::{cell::Cell, collections::HashMap, rc::Rc};
 
+use std::time::{Duration, Instant};
+
 use gpui::{
     AnyElement, App, Bounds, ContentMask, Context, CursorStyle, DispatchPhase, Entity,
-    EventEmitter, Hitbox, HitboxBehavior, Hsla, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollWheelEvent,
-    SharedString, Styled as _, Window, canvas, div, point, px,
+    EventEmitter, FocusHandle, Focusable, Hitbox, HitboxBehavior, Hsla, InteractiveElement as _,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+    Pixels, Point, Render, ScrollWheelEvent, SharedString, Styled as _, Window, canvas, div, point,
+    px,
+};
+
+use crate::actions::{
+    Activate, ClearSelection, FitView, KEY_CONTEXT, OpenContextMenu, SelectDown, SelectLeft,
+    SelectRight, SelectUp, ZoomIn, ZoomOut,
 };
 
 use crate::geometry::EdgeGeometry;
 use crate::layout::{Body, ForceConfig, Simulation, Vec2};
 use crate::model::{Edge, GraphData, Node};
-use crate::style::{ColorBy, GraphColors, LabelMode, NodeSizing, Palette};
+use crate::style::{ColorBy, GraphColors, GraphMetrics, LabelMode, NodeSizing, Palette};
 use visual::{GroupInput, Vertex, Visual};
 
 const MIN_ZOOM: f32 = 0.05;
@@ -22,6 +30,9 @@ const MAX_ZOOM: f32 = 6.;
 const DRAG_THRESHOLD: f32 = 3.;
 /// Pointer distance (px) within which an edge counts as hit.
 const EDGE_HIT_SLOP: f32 = 4.;
+/// With reduced motion, the layout is computed within this budget per frame
+/// instead of being animated.
+const REDUCED_MOTION_BUDGET: Duration = Duration::from_millis(120);
 
 /// What the user has selected or is pointing at.
 #[derive(Clone, Debug, Default)]
@@ -39,7 +50,7 @@ pub enum Selection {
 
 #[derive(Clone, Debug)]
 #[non_exhaustive]
-pub enum GraphEvent {
+pub enum NetworkGraphEvent {
     SelectionChanged(Selection),
     /// Double-click on a node: the usual "expand neighbors" gesture in graph explorers.
     NodeActivated(Node),
@@ -51,6 +62,7 @@ pub enum GraphEvent {
 
 /// A category present in the graph, for legends.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct CategoryInfo {
     pub name: SharedString,
     pub color: Hsla,
@@ -59,6 +71,7 @@ pub struct CategoryInfo {
 
 /// A group (community) present in the graph.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct GroupInfo {
     pub id: SharedString,
     pub label: SharedString,
@@ -107,7 +120,7 @@ struct GroupState {
 
 enum DragKind {
     Pan { start_pan: Point<Pixels> },
-    Vertex { index: usize, was_pinned: bool },
+    Vertex { ix: usize, was_pinned: bool },
 }
 
 struct Drag {
@@ -124,7 +137,7 @@ struct Drag {
 ///         .with_data(GraphData::new(nodes, edges))
 ///         .with_label_mode(LabelMode::Auto)
 /// });
-/// cx.subscribe(&graph, |this, _, event: &GraphEvent, cx| { /* ... */ }).detach();
+/// cx.subscribe(&graph, |this, _, event: &NetworkGraphEvent, cx| { /* ... */ }).detach();
 /// ```
 ///
 /// Place it in a sized container: it fills its parent.
@@ -156,25 +169,34 @@ pub struct NetworkGraph {
     selected: Option<SelectionKey>,
     drag: Option<Drag>,
     pointer: Option<Point<Pixels>>,
+    focus_handle: FocusHandle,
+    /// The last interaction came from the keyboard: show focus indicators.
+    keyboard_nav: bool,
 
     label_mode: LabelMode,
     color_by: ColorBy,
-    show_arrows: bool,
-    show_edge_labels: bool,
-    show_group_hulls: bool,
+    arrows: bool,
+    edge_labels: bool,
+    group_hulls: bool,
     /// Dragged nodes stay where they are dropped.
-    pin_on_drag: bool,
+    sticky_drag: bool,
     palette: Palette,
     sizing: NodeSizing,
     colors: Option<GraphColors>,
     tooltip: Option<TooltipBuilder>,
-    show_tooltip: bool,
+    tooltips: bool,
 }
 
-impl EventEmitter<GraphEvent> for NetworkGraph {}
+impl EventEmitter<NetworkGraphEvent> for NetworkGraph {}
+
+impl Focusable for NetworkGraph {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
 
 impl NetworkGraph {
-    pub fn new(_cx: &mut Context<Self>) -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             nodes: Vec::new(),
             node_bodies: Vec::new(),
@@ -196,17 +218,19 @@ impl NetworkGraph {
             selected: None,
             drag: None,
             pointer: None,
+            focus_handle: cx.focus_handle().tab_stop(true),
+            keyboard_nav: false,
             label_mode: LabelMode::default(),
             color_by: ColorBy::default(),
-            show_arrows: true,
-            show_edge_labels: true,
-            show_group_hulls: true,
-            pin_on_drag: false,
+            arrows: true,
+            edge_labels: true,
+            group_hulls: true,
+            sticky_drag: false,
             palette: Palette::default(),
             sizing: NodeSizing::default(),
             colors: None,
             tooltip: None,
-            show_tooltip: true,
+            tooltips: true,
         }
     }
 
@@ -232,24 +256,27 @@ impl NetworkGraph {
         self
     }
 
-    pub fn with_arrows(mut self, show: bool) -> Self {
-        self.show_arrows = show;
+    /// Draw direction arrows on edges (default on).
+    pub fn arrows(mut self, arrows: bool) -> Self {
+        self.arrows = arrows;
         self
     }
 
-    pub fn with_edge_labels(mut self, show: bool) -> Self {
-        self.show_edge_labels = show;
+    /// Draw relationship labels on edges (default on).
+    pub fn edge_labels(mut self, edge_labels: bool) -> Self {
+        self.edge_labels = edge_labels;
         self
     }
 
     /// Outline each expanded group with a rounded hull (default on).
-    pub fn with_group_hulls(mut self, show: bool) -> Self {
-        self.show_group_hulls = show;
+    pub fn group_hulls(mut self, group_hulls: bool) -> Self {
+        self.group_hulls = group_hulls;
         self
     }
 
-    pub fn with_pin_on_drag(mut self, pin: bool) -> Self {
-        self.pin_on_drag = pin;
+    /// Keep dragged nodes pinned where they are dropped (default off).
+    pub fn sticky_drag(mut self, sticky: bool) -> Self {
+        self.sticky_drag = sticky;
         self
     }
 
@@ -278,8 +305,9 @@ impl NetworkGraph {
         self
     }
 
-    pub fn without_tooltip(mut self) -> Self {
-        self.show_tooltip = false;
+    /// Show tooltips for the hovered item (default on).
+    pub fn tooltips(mut self, tooltips: bool) -> Self {
+        self.tooltips = tooltips;
         self
     }
 
@@ -303,35 +331,48 @@ impl NetworkGraph {
         cx.notify();
     }
 
-    pub fn show_arrows(&self) -> bool {
-        self.show_arrows
+    pub fn has_arrows(&self) -> bool {
+        self.arrows
     }
 
-    pub fn set_show_arrows(&mut self, show: bool, cx: &mut Context<Self>) {
-        self.show_arrows = show;
+    pub fn set_arrows(&mut self, arrows: bool, cx: &mut Context<Self>) {
+        self.arrows = arrows;
         cx.notify();
     }
 
-    pub fn show_edge_labels(&self) -> bool {
-        self.show_edge_labels
+    pub fn has_edge_labels(&self) -> bool {
+        self.edge_labels
     }
 
-    pub fn set_show_edge_labels(&mut self, show: bool, cx: &mut Context<Self>) {
-        self.show_edge_labels = show;
+    pub fn set_edge_labels(&mut self, edge_labels: bool, cx: &mut Context<Self>) {
+        self.edge_labels = edge_labels;
         cx.notify();
     }
 
-    pub fn show_group_hulls(&self) -> bool {
-        self.show_group_hulls
+    pub fn has_group_hulls(&self) -> bool {
+        self.group_hulls
     }
 
-    pub fn set_show_group_hulls(&mut self, show: bool, cx: &mut Context<Self>) {
-        self.show_group_hulls = show;
+    pub fn set_group_hulls(&mut self, group_hulls: bool, cx: &mut Context<Self>) {
+        self.group_hulls = group_hulls;
         cx.notify();
     }
 
-    pub fn set_pin_on_drag(&mut self, pin: bool) {
-        self.pin_on_drag = pin;
+    pub fn is_sticky_drag(&self) -> bool {
+        self.sticky_drag
+    }
+
+    pub fn set_sticky_drag(&mut self, sticky: bool) {
+        self.sticky_drag = sticky;
+    }
+
+    pub fn has_tooltips(&self) -> bool {
+        self.tooltips
+    }
+
+    pub fn set_tooltips(&mut self, tooltips: bool, cx: &mut Context<Self>) {
+        self.tooltips = tooltips;
+        cx.notify();
     }
 
     pub fn set_force_config(&mut self, config: ForceConfig, cx: &mut Context<Self>) {
@@ -352,7 +393,7 @@ impl NetworkGraph {
         let had_selection = self.selected.is_some();
         self.load(data);
         if had_selection {
-            cx.emit(GraphEvent::SelectionChanged(Selection::None));
+            cx.emit(NetworkGraphEvent::SelectionChanged(Selection::None));
         }
         cx.notify();
     }
@@ -612,8 +653,13 @@ impl NetworkGraph {
             .unwrap_or_default()
     }
 
+    /// The colors in effect: the override, or the current theme.
+    pub fn resolved_colors(&self, cx: &App) -> GraphColors {
+        self.colors.clone().unwrap_or_else(|| GraphColors::from_theme(cx))
+    }
+
     /// The color a node is painted with.
-    pub fn color_of(&self, node: &Node) -> Hsla {
+    pub fn color_of(&self, node: &Node, cx: &App) -> Hsla {
         if let Some(c) = node.color {
             return c;
         }
@@ -624,7 +670,7 @@ impl NetworkGraph {
             }
             ColorBy::Group => match node.group.as_ref().and_then(|g| self.group_index.get(g)) {
                 Some(&g) => self.group_color(g),
-                None => gpui::hsla(0., 0., 0.62, 1.),
+                None => self.resolved_colors(cx).ungrouped,
             },
         }
     }
@@ -708,7 +754,7 @@ impl NetworkGraph {
     fn validate_selection(&mut self, cx: &mut Context<Self>) {
         if self.selected.is_some() && matches!(self.selection(), Selection::None) {
             self.selected = None;
-            cx.emit(GraphEvent::SelectionChanged(Selection::None));
+            cx.emit(NetworkGraphEvent::SelectionChanged(Selection::None));
         }
     }
 
@@ -733,7 +779,7 @@ impl NetworkGraph {
             return;
         }
         self.selected = key;
-        cx.emit(GraphEvent::SelectionChanged(self.selection()));
+        cx.emit(NetworkGraphEvent::SelectionChanged(self.selection()));
         cx.notify();
     }
 
@@ -848,13 +894,13 @@ impl NetworkGraph {
         if let (false, Some(SelectionKey::Group(id))) = (collapse, &self.selected) {
             if targets.iter().any(|&g| &self.groups[g].id == id) {
                 self.selected = None;
-                cx.emit(GraphEvent::SelectionChanged(Selection::None));
+                cx.emit(NetworkGraphEvent::SelectionChanged(Selection::None));
             }
         }
         self.rebuild();
         self.sim.reheat(0.4);
         for g in targets {
-            cx.emit(GraphEvent::GroupToggled { group: self.groups[g].id.clone(), collapsed: collapse });
+            cx.emit(NetworkGraphEvent::GroupToggled { group: self.groups[g].id.clone(), collapsed: collapse });
         }
         cx.notify();
     }
@@ -961,22 +1007,129 @@ impl NetworkGraph {
         best.1.map(Item::Edge)
     }
 
+    // ---- keyboard -----------------------------------------------------------
+
+    fn on_zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
+        self.keyboard_nav = true;
+        self.zoom_by(1.25, cx);
+    }
+
+    fn on_zoom_out(&mut self, _: &ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
+        self.keyboard_nav = true;
+        self.zoom_by(0.8, cx);
+    }
+
+    fn on_fit_view(&mut self, _: &FitView, _: &mut Window, cx: &mut Context<Self>) {
+        self.keyboard_nav = true;
+        self.fit_view(cx);
+    }
+
+    fn on_clear_selection(&mut self, _: &ClearSelection, _: &mut Window, cx: &mut Context<Self>) {
+        self.keyboard_nav = true;
+        if self.selected.is_some() {
+            self.set_selected(None, cx);
+        } else {
+            cx.propagate();
+        }
+    }
+
+    fn on_activate(&mut self, _: &Activate, _: &mut Window, cx: &mut Context<Self>) {
+        self.keyboard_nav = true;
+        match self.selected.clone() {
+            Some(SelectionKey::Node(id)) => {
+                if let Some(node) = self.node(&id).cloned() {
+                    cx.emit(NetworkGraphEvent::NodeActivated(node));
+                }
+            }
+            Some(SelectionKey::Group(id)) => self.toggle_group(&id, cx),
+            _ => cx.propagate(),
+        }
+    }
+
+    fn on_open_context_menu(&mut self, _: &OpenContextMenu, _: &mut Window, cx: &mut Context<Self>) {
+        self.keyboard_nav = true;
+        let position = match self.selected_item() {
+            Some(Item::Vertex(v)) => self.to_screen(self.vis.bodies[v].pos),
+            Some(Item::Edge(e)) => self.edge_geometry(e).midpoint(),
+            None => self.bounds.get().center(),
+        };
+        cx.emit(NetworkGraphEvent::ContextMenu { target: self.selection(), position });
+    }
+
+    /// Move the selection to the nearest vertex in a direction (spatial navigation).
+    /// With nothing selected, start from the vertex nearest the viewport center.
+    fn select_toward(&mut self, dx: f32, dy: f32, cx: &mut Context<Self>) {
+        self.keyboard_nav = true;
+        let bodies = &self.vis.bodies;
+        if bodies.is_empty() {
+            return;
+        }
+        let from = match self.selected_item() {
+            Some(Item::Vertex(v)) => Some(v),
+            Some(Item::Edge(e)) => Some(self.vis.edges[e].source),
+            None => None,
+        };
+        let target = match from {
+            None => {
+                let c = self.to_world(self.bounds.get().center());
+                (0..bodies.len()).min_by(|&a, &b| {
+                    let d = |i: usize| (bodies[i].pos.x - c.x).hypot(bodies[i].pos.y - c.y);
+                    d(a).total_cmp(&d(b))
+                })
+            }
+            Some(f) => {
+                let p = bodies[f].pos;
+                (0..bodies.len())
+                    .filter(|&i| i != f)
+                    .filter_map(|i| {
+                        let (x, y) = (bodies[i].pos.x - p.x, bodies[i].pos.y - p.y);
+                        let dist = x.hypot(y).max(1e-3);
+                        let cos = (x * dx + y * dy) / dist;
+                        // Within ±60° of the direction; prefer straight ahead.
+                        (cos > 0.5).then(|| (i, dist * (2. - cos)))
+                    })
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(i, _)| i)
+            }
+        };
+        let Some(v) = target else { return };
+        self.reveal(v);
+        let key = self.key_of(Item::Vertex(v));
+        self.set_selected(Some(key), cx);
+        cx.notify();
+    }
+
+    /// Pan just enough to bring a vertex into view.
+    fn reveal(&mut self, v: usize) {
+        let bounds = self.bounds.get();
+        let margin = px(48.);
+        let p = self.to_screen(self.vis.bodies[v].pos);
+        let inner = Bounds::from_corners(bounds.origin + point(margin, margin), bounds.bottom_right() - point(margin, margin));
+        if !inner.contains(&p) {
+            self.auto_fit = false;
+            let clamped = point(p.x.clamp(inner.left(), inner.right()), p.y.clamp(inner.top(), inner.bottom()));
+            self.pan = self.pan + (clamped - p);
+        }
+    }
+
     // ---- input --------------------------------------------------------------
 
-    fn on_mouse_down(&mut self, ev: &MouseDownEvent, cx: &mut Context<Self>) {
+    fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus_handle, cx);
+        self.keyboard_nav = false;
         let hit = self.hit_test(ev.position);
         if ev.button == MouseButton::Right {
             if let Some(item) = hit {
                 self.set_selected(Some(self.key_of(item)), cx);
             }
             let target = hit.map_or(Selection::None, |item| self.item_selection(item));
-            cx.emit(GraphEvent::ContextMenu { target, position: ev.position });
+            cx.emit(NetworkGraphEvent::ContextMenu { target, position: ev.position });
             return;
         }
         if ev.click_count >= 2 {
             match hit {
                 Some(Item::Vertex(v)) => match self.vis.vertices[v] {
-                    Vertex::Node(i) => cx.emit(GraphEvent::NodeActivated(self.nodes[i].clone())),
+                    Vertex::Node(i) => cx.emit(NetworkGraphEvent::NodeActivated(self.nodes[i].clone())),
                     Vertex::Group(g) => {
                         let id = self.groups[g].id.clone();
                         self.expand_group(&id, cx);
@@ -987,8 +1140,8 @@ impl NetworkGraph {
             return;
         }
         let kind = match hit {
-            Some(Item::Vertex(index)) => {
-                DragKind::Vertex { index, was_pinned: self.vis.bodies[index].fixed.is_some() }
+            Some(Item::Vertex(ix)) => {
+                DragKind::Vertex { ix, was_pinned: self.vis.bodies[ix].fixed.is_some() }
             }
             _ => DragKind::Pan { start_pan: self.pan },
         };
@@ -1010,10 +1163,10 @@ impl NetworkGraph {
                     self.auto_fit = false;
                     self.pan = start_pan + delta;
                 }
-                DragKind::Vertex { index, .. } => {
+                DragKind::Vertex { ix, .. } => {
                     let w = self.to_world(ev.position);
-                    self.vis.bodies[index].fixed = Some(w);
-                    self.vis.bodies[index].pos = w;
+                    self.vis.bodies[ix].fixed = Some(w);
+                    self.vis.bodies[ix].pos = w;
                     self.sim.alpha_target = 0.3;
                     self.sim.reheat(0.3);
                     self.auto_fit = false;
@@ -1033,13 +1186,13 @@ impl NetworkGraph {
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, cx: &mut Context<Self>) {
         let Some(drag) = self.drag.take() else { return };
         match drag.kind {
-            DragKind::Vertex { index, was_pinned } => {
+            DragKind::Vertex { ix, was_pinned } => {
                 self.sim.alpha_target = 0.;
                 if !drag.moved {
-                    let key = self.key_of(Item::Vertex(index));
+                    let key = self.key_of(Item::Vertex(ix));
                     self.set_selected(Some(key), cx);
-                } else if !(self.pin_on_drag || was_pinned) {
-                    self.vis.bodies[index].fixed = None;
+                } else if !(self.sticky_drag || was_pinned) {
+                    self.vis.bodies[ix].fixed = None;
                 }
             }
             DragKind::Pan { .. } => {
@@ -1064,25 +1217,54 @@ impl NetworkGraph {
 impl Render for NetworkGraph {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.sim.is_active() && !self.vis.bodies.is_empty() {
-            // Small graphs can afford two ticks per frame and settle twice as fast.
-            let ticks = if self.vis.bodies.len() > 1500 { 1 } else { 2 };
+            let reduce_motion = cx.reduce_motion();
             let vis = &mut self.vis;
-            for _ in 0..ticks {
-                self.sim.tick(&mut vis.bodies, &vis.links, &vis.degrees, &vis.clusters);
+            if reduce_motion {
+                // Settle off-screen instead of animating the layout.
+                let deadline = Instant::now() + REDUCED_MOTION_BUDGET;
+                while self.sim.is_active() && self.sim.alpha_target == 0. && Instant::now() < deadline {
+                    self.sim.tick(&mut vis.bodies, &vis.links, &vis.degrees, &vis.clusters);
+                }
+                if self.sim.alpha_target != 0. {
+                    self.sim.tick(&mut vis.bodies, &vis.links, &vis.degrees, &vis.clusters);
+                }
+            } else {
+                // Small graphs can afford two ticks per frame and settle twice as fast.
+                let ticks = if vis.bodies.len() > 1500 { 1 } else { 2 };
+                for _ in 0..ticks {
+                    self.sim.tick(&mut vis.bodies, &vis.links, &vis.degrees, &vis.clusters);
+                }
             }
             if self.auto_fit {
-                self.apply_fit(0.25);
+                self.apply_fit(if reduce_motion { 1. } else { 0.25 });
             }
-            window.request_animation_frame();
+            if self.sim.is_active() {
+                window.request_animation_frame();
+            }
         }
 
-        let colors = self.colors.clone().unwrap_or_else(|| GraphColors::from_theme(cx));
-        let tooltip = self.tooltip_element(&colors, window, cx);
+        let colors = self.resolved_colors(cx);
+        let metrics = GraphMetrics::from_theme(cx);
+        let tooltip = self.tooltip_element(&colors, &metrics, window, cx);
         let entity = cx.entity();
         let bounds_cell = self.bounds.clone();
         let background = colors.background;
+        let show_focus = self.keyboard_nav && self.focus_handle.is_focused(window);
 
         div()
+            .id("network-graph")
+            .track_focus(&self.focus_handle)
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(Self::on_zoom_in))
+            .on_action(cx.listener(Self::on_zoom_out))
+            .on_action(cx.listener(Self::on_fit_view))
+            .on_action(cx.listener(Self::on_clear_selection))
+            .on_action(cx.listener(Self::on_activate))
+            .on_action(cx.listener(Self::on_open_context_menu))
+            .on_action(cx.listener(|this, _: &SelectLeft, _, cx| this.select_toward(-1., 0., cx)))
+            .on_action(cx.listener(|this, _: &SelectRight, _, cx| this.select_toward(1., 0., cx)))
+            .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.select_toward(0., -1., cx)))
+            .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.select_toward(0., 1., cx)))
             .size_full()
             .relative()
             .overflow_hidden()
@@ -1096,7 +1278,9 @@ impl Render for NetworkGraph {
                     move |bounds, hitbox: Hitbox, window, cx| {
                         register_input(&entity, &hitbox, window, cx);
                         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                            entity.update(cx, |this, cx| this.paint_graph(bounds, &colors, window, cx));
+                            entity.update(cx, |this, cx| {
+                                this.paint_graph(bounds, &colors, &metrics, show_focus, window, cx)
+                            });
                         });
                     },
                 )
@@ -1110,9 +1294,9 @@ impl Render for NetworkGraph {
 /// tracking outside the graph's bounds.
 fn register_input(entity: &Entity<NetworkGraph>, hitbox: &Hitbox, window: &mut Window, cx: &mut App) {
     let graph = entity.read(cx);
-    let cursor = match (&graph.drag, graph.hovered) {
-        (Some(d), _) if d.moved => CursorStyle::ClosedHand,
-        (_, Some(_)) => CursorStyle::PointingHand,
+    // Pointing hand is reserved for links; hover state is shown by the halo.
+    let cursor = match &graph.drag {
+        Some(d) if d.moved => CursorStyle::ClosedHand,
         _ => CursorStyle::Arrow,
     };
     window.set_cursor_style(cursor, hitbox);
@@ -1121,7 +1305,7 @@ fn register_input(entity: &Entity<NetworkGraph>, hitbox: &Hitbox, window: &mut W
     window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
         let button_ok = matches!(ev.button, MouseButton::Left | MouseButton::Right);
         if phase == DispatchPhase::Bubble && button_ok && h.is_hovered(window) {
-            e.update(cx, |this, cx| this.on_mouse_down(ev, cx));
+            e.update(cx, |this, cx| this.on_mouse_down(ev, window, cx));
         }
     });
     let (e, h) = (entity.clone(), hitbox.clone());
