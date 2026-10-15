@@ -17,5 +17,5 @@ mod view;
 
 pub use layout::ForceConfig;
 pub use model::{Edge, GraphData, Node};
-pub use style::{GraphColors, LabelMode, NodeSizing, Palette};
-pub use view::{CategoryInfo, GraphEvent, NetworkGraph, Selection, TooltipBuilder};
+pub use style::{ColorBy, GraphColors, LabelMode, NodeSizing, Palette};
+pub use view::{CategoryInfo, GraphEvent, GroupInfo, NetworkGraph, Selection, TooltipBuilder};

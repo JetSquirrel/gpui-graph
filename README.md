@@ -5,7 +5,7 @@
 ```
 crates/gpui-graph     组件库
 examples/basic        最小接入示例
-examples/query-app    图查询工具原型（查询框 / 图例 / 详情 / 右键菜单）
+examples/query-app    图查询工具原型（查询框 / 图例 / 社区列表 / 详情 / 右键菜单）
 ```
 
 ```sh
@@ -59,8 +59,15 @@ div().flex_1().child(graph.clone())
 | 固定 | `set_pinned` `is_pinned` `unpin_all` |
 | 查询 | `node` `degree` `neighbors_of` `edges_of` `categories` `color_of` `selection` `zoom` `is_simulating` |
 | 运行时设置 | `set_label_mode` `set_show_arrows` `set_show_edge_labels` `set_pin_on_drag` `set_force_config` `set_colors` |
-| 事件 | `SelectionChanged(Selection)` `NodeActivated(Node)` `ContextMenu { target, position }` |
+| 社区 | `groups` `group` `group_members` `collapse_group` `expand_group` `toggle_group` `collapse_all_groups` `expand_all_groups` `set_group_label` |
+| 社区显示 | `with_color_by` / `set_color_by`（`ColorBy::Category` / `ColorBy::Group`）`with_group_hulls` / `set_show_group_hulls` |
+| 事件 | `SelectionChanged(Selection)` `NodeActivated(Node)` `GroupToggled { group, collapsed }` `ContextMenu { target, position }` |
 
+- **社区**：组件不计算社区，读取 `Node::group`（由数据库算好，如 Neo4j GDS Louvain 写回的 `community` 属性）。
+  - 展示：按社区着色、圆角凸包轮廓 + 社区名、布局中的社区聚拢力（`ForceConfig::group_strength`，0 关闭）。
+  - 折叠：社区收成一个超级节点（显示成员数，外圈双环），指向它的边按方向合并成一条加粗边并标 `×N`；双击超级节点展开，成员按折叠前的相对位置还原。
+  - 折叠只改变显示，`data()` / `node_count()` 等仍是完整数据；选中状态按 id 保持，折叠再展开不丢。
+  - `Selection` 新增 `Group(GroupInfo)`（选中超级节点）和 `EdgeBundle(Vec<Edge>)`（选中合并边）。
 - **样式**：默认每帧读取 gpui-base `Theme` tokens，跟随深浅色；`GraphColors` 可整体覆盖。分类色默认 AntV 色板（`Palette`），`Node::color` / `Node::size` 可单独覆盖。
 - **节点大小**：`NodeSizing::Degree { min, max }`（默认，按度数）或 `NodeSizing::Fixed(r)`。
 - **Tooltip**：`with_tooltip(|selection, colors, window, cx| Some(element))` 自定义，返回 `None` 隐藏。
@@ -74,8 +81,10 @@ div().flex_1().child(graph.clone())
 
 | 文件 | 说明 |
 |---|---|
-| `layout.rs` | d3-force 风格模拟：link / many-body（Barnes–Hut 四叉树）/ collide（空间哈希）/ gravity，alpha 退火 |
-| `view.rs` | `NetworkGraph`：`canvas` 绘制（边按状态批量成 path）、hitbox + 窗口级鼠标事件、视口变换、tooltip |
-| `geometry.rs` | 直线/二次曲线边的几何、命中检测 |
-| `style.rs` | `GraphColors` `Palette` `NodeSizing` `LabelMode` |
+| `layout.rs` | d3-force 风格模拟：link / many-body（Barnes–Hut 四叉树）/ collide（空间哈希）/ gravity / 社区聚拢，alpha 退火 |
+| `view/mod.rs` | `NetworkGraph`：模型层（全部节点、持久位置、社区状态）、API、输入、视口 |
+| `view/visual.rs` | 可见图：由模型 + 折叠状态派生（超级节点、合并边），布局在其上运行 |
+| `view/paint.rs` | `canvas` 绘制：社区轮廓、边按状态批量成 path、节点、标签、tooltip |
+| `geometry.rs` | 直线/二次曲线边的几何、命中检测、凸包与圆角轮廓 |
+| `style.rs` | `GraphColors` `Palette` `NodeSizing` `LabelMode` `ColorBy` |
 | `model.rs` | `Node` `Edge` `GraphData` |

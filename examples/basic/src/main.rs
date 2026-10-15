@@ -35,6 +35,7 @@ impl Example {
                     Selection::None => "nothing".into(),
                     Selection::Node(n) => format!("node {}", n.label),
                     Selection::Edge(e) => format!("edge {} → {}", e.source, e.target),
+                    _ => "other".into(),
                 };
                 cx.notify();
             }

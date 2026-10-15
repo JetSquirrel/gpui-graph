@@ -93,3 +93,13 @@ pub enum LabelMode {
     Always,
     Never,
 }
+
+/// What node colors encode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColorBy {
+    /// [`Node::category`](crate::Node::category), e.g. vertex type.
+    #[default]
+    Category,
+    /// [`Node::group`](crate::Node::group), e.g. community. Ungrouped nodes are grey.
+    Group,
+}

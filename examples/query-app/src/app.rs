@@ -6,12 +6,12 @@ use gpui::{
 };
 use gpui_base::input::{InputEditorStyle, InputEvent, InputState};
 use gpui_base::{Button, ColorTokens, Input, InputBase, SemanticThemeTokens, Theme, h_flex, v_flex};
-use gpui_graph::{GraphEvent, LabelMode, NetworkGraph, Node, Selection};
+use gpui_graph::{ColorBy, GraphEvent, LabelMode, NetworkGraph, Selection};
 
 use crate::source::{GraphSource, MemorySource, sample_movies};
 
 struct ContextMenu {
-    node: Node,
+    target: Selection,
     position: Point<Pixels>,
 }
 
@@ -48,14 +48,12 @@ impl GraphQueryApp {
                     cx.notify();
                 }
                 GraphEvent::NodeActivated(node) => this.expand(&node.id, cx),
-                GraphEvent::ContextMenu { target: Selection::Node(node), position } => {
-                    this.menu = Some(ContextMenu { node: node.clone(), position: *position });
+                GraphEvent::ContextMenu { target, position } => {
+                    let actionable = matches!(target, Selection::Node(_) | Selection::Group(_));
+                    this.menu = actionable.then(|| ContextMenu { target: target.clone(), position: *position });
                     cx.notify();
                 }
-                GraphEvent::ContextMenu { .. } => {
-                    this.menu = None;
-                    cx.notify();
-                }
+                _ => cx.notify(),
             }),
             cx.observe_window_appearance(window, |this, window, cx| {
                 apply_theme(window, cx);
@@ -122,6 +120,8 @@ impl GraphQueryApp {
         let graph = self.graph.read(cx);
         let label_mode = graph.label_mode();
         let arrows = graph.show_arrows();
+        let color_by = graph.color_by();
+        let hulls = graph.show_group_hulls();
 
         h_flex()
             .h(px(48.))
@@ -197,12 +197,37 @@ impl GraphQueryApp {
                     }),
                 ),
             )
+            .child(div().w(px(1.)).h(px(20.)).bg(t.border))
+            .child(
+                button(
+                    "color-by",
+                    if color_by == ColorBy::Group { "Color: community" } else { "Color: type" },
+                    false,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.graph.update(cx, |g, cx| {
+                        let next = if g.color_by() == ColorBy::Group { ColorBy::Category } else { ColorBy::Group };
+                        g.set_color_by(next, cx);
+                    });
+                    cx.notify();
+                })),
+            )
+            .child(
+                button("hulls", if hulls { "Hulls: on" } else { "Hulls: off" }, false, cx).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.graph.update(cx, |g, cx| g.set_show_group_hulls(!g.show_group_hulls(), cx));
+                        cx.notify();
+                    }),
+                ),
+            )
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = Theme::global(cx).tokens.colors;
         let graph = self.graph.read(cx);
         let legend = graph.categories();
+        let groups = graph.groups();
 
         let details = match &self.selection {
             Selection::None => v_flex()
@@ -211,8 +236,63 @@ impl GraphQueryApp {
                 .text_color(t.muted_foreground)
                 .child("Click a node or edge to inspect it.")
                 .child("Double-click a node to expand its neighbors.")
-                .child("Right-click a node for more actions.")
+                .child("Right-click a node or community for more actions.")
+                .child("Communities: collapse / expand from the list above.")
                 .child("Drag nodes · drag background to pan · scroll to zoom."),
+            Selection::Group(group) => {
+                let id = group.id.clone();
+                let members = graph.group_members(&group.id);
+                let shown = members.len().min(50);
+                v_flex()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(
+                                h_flex()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .child(div().size_2p5().rounded_full().bg(group.color))
+                                    .child(div().text_xs().text_color(t.muted_foreground).child("Community (collapsed)")),
+                            )
+                            .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(group.label.clone())),
+                    )
+                    .child(button("expand-group", "Expand community", true, cx).on_click(cx.listener(
+                        move |this, _, _, cx| this.graph.update(cx, |g, cx| g.expand_group(&id, cx)),
+                    )))
+                    .child(section_title("MEMBERS", t.muted_foreground))
+                    .child(v_flex().gap_0p5().text_sm().children(members.into_iter().take(shown).map(|n| {
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .px_2()
+                            .child(div().size_2().rounded_full().bg(graph.color_of(&n)))
+                            .child(n.label.clone())
+                    })))
+                    .children((group.size > shown).then(|| {
+                        div().text_xs().text_color(t.muted_foreground).child(format!("… and {} more", group.size - shown))
+                    }))
+            }
+            Selection::EdgeBundle(edges) => {
+                let mut by_label: Vec<(SharedString, usize)> = Vec::new();
+                for e in edges {
+                    match by_label.iter_mut().find(|(l, _)| l == &e.label) {
+                        Some((_, n)) => *n += 1,
+                        None => by_label.push((e.label.clone(), 1)),
+                    }
+                }
+                v_flex()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_xs().text_color(t.muted_foreground).child("Merged relationships"))
+                            .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(format!("{} edges", edges.len()))),
+                    )
+                    .child(properties_table(t.border).children(by_label.into_iter().map(|(label, n)| {
+                        kv_row(label, n.to_string().into(), t.border, t.muted_foreground)
+                    })))
+            }
             Selection::Edge(edge) => {
                 let source = graph.node(&edge.source).map(|n| n.label.clone()).unwrap_or_default();
                 let target = graph.node(&edge.target).map(|n| n.label.clone()).unwrap_or_default();
@@ -281,6 +361,7 @@ impl GraphQueryApp {
                             }))
                     })))
             }
+            _ => v_flex(),
         };
 
         v_flex()
@@ -294,7 +375,7 @@ impl GraphQueryApp {
             .border_color(t.border)
             .bg(t.surface)
             .overflow_y_scroll()
-            .child(section_title("LEGEND", t.muted_foreground))
+            .child(section_title("TYPES", t.muted_foreground))
             .child(v_flex().gap_1().children(legend.into_iter().map(|c| {
                 h_flex()
                     .gap_2()
@@ -304,6 +385,43 @@ impl GraphQueryApp {
                     .child(div().flex_1().child(c.name))
                     .child(div().text_color(t.muted_foreground).child(c.count.to_string()))
             })))
+            .children((!groups.is_empty()).then(|| {
+                v_flex()
+                    .gap_2()
+                    .child(div().h(px(1.)).bg(t.border))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(div().flex_1().child(section_title("COMMUNITIES", t.muted_foreground)))
+                            .child(small_button("collapse-all", "Collapse all", cx).on_click(cx.listener(
+                                |this, _, _, cx| this.graph.update(cx, |g, cx| g.collapse_all_groups(cx)),
+                            )))
+                            .child(small_button("expand-all", "Expand all", cx).on_click(cx.listener(
+                                |this, _, _, cx| this.graph.update(cx, |g, cx| g.expand_all_groups(cx)),
+                            ))),
+                    )
+                    .child(v_flex().gap_0p5().children(groups.into_iter().map(|g| {
+                        let id = g.id.clone();
+                        h_flex()
+                            .id(SharedString::from(format!("group-{}", g.id)))
+                            .gap_2()
+                            .items_center()
+                            .px_1()
+                            .py_0p5()
+                            .rounded_md()
+                            .text_sm()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(t.accent))
+                            .child(div().w(px(10.)).text_color(t.muted_foreground).child(if g.collapsed { "▸" } else { "▾" }))
+                            .child(div().size_2p5().rounded_full().bg(g.color))
+                            .child(div().flex_1().child(g.label))
+                            .child(div().text_color(t.muted_foreground).child(g.size.to_string()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.graph.update(cx, |g, cx| g.toggle_group(&id, cx));
+                            }))
+                    })))
+            }))
             .child(div().h(px(1.)).bg(t.border))
             .child(section_title("DETAILS", t.muted_foreground))
             .child(details)
@@ -312,63 +430,83 @@ impl GraphQueryApp {
     fn context_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let menu = self.menu.as_ref()?;
         let t = Theme::global(cx).tokens.colors;
-        let id = menu.node.id.clone();
-        let pinned = self.graph.read(cx).is_pinned(&id);
-
-        let item = |key: &'static str, label: &'static str| {
-            div()
-                .id(key)
-                .px_2()
-                .py_1()
-                .rounded_sm()
-                .cursor_pointer()
-                .hover(|s| s.bg(t.accent))
-                .child(label)
+        let item = |key: &'static str, label: SharedString| {
+            div().id(key).px_2().py_1().rounded_sm().cursor_pointer().hover(|s| s.bg(t.accent)).child(label)
         };
-        let (expand_id, pin_id, hide_id) = (id.clone(), id.clone(), id.clone());
-        Some(deferred(
-            anchored().position(menu.position).snap_to_window().child(
-                v_flex()
-                    .id("graph-context-menu")
-                    .min_w(px(160.))
-                    .p_1()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(t.border)
-                    .bg(t.surface)
-                    .shadow_lg()
-                    .text_sm()
-                    .text_color(t.foreground)
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.menu = None;
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .text_xs()
-                            .text_color(t.muted_foreground)
-                            .child(menu.node.label.clone()),
-                    )
-                    .child(item("expand", "Expand neighbors").on_click(cx.listener(move |this, _, _, cx| {
+
+        let mut panel = v_flex()
+            .id("graph-context-menu")
+            .min_w(px(180.))
+            .p_1()
+            .rounded_md()
+            .border_1()
+            .border_color(t.border)
+            .bg(t.surface)
+            .shadow_lg()
+            .text_sm()
+            .text_color(t.foreground)
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.menu = None;
+                cx.notify();
+            }));
+
+        match &menu.target {
+            Selection::Node(node) => {
+                let id = node.id.clone();
+                let pinned = self.graph.read(cx).is_pinned(&id);
+                let (expand_id, pin_id, hide_id) = (id.clone(), id.clone(), id.clone());
+                panel = panel
+                    .child(div().px_2().py_1().text_xs().text_color(t.muted_foreground).child(node.label.clone()))
+                    .child(item("expand", "Expand neighbors".into()).on_click(cx.listener(move |this, _, _, cx| {
                         this.menu = None;
                         this.expand(&expand_id, cx);
                     })))
-                    .child(item("pin", if pinned { "Unpin" } else { "Pin position" }).on_click(cx.listener(
+                    .child(item("pin", if pinned { "Unpin" } else { "Pin position" }.into()).on_click(cx.listener(
                         move |this, _, _, cx| {
                             this.menu = None;
                             this.graph.update(cx, |g, cx| g.set_pinned(&pin_id, !pinned, cx));
                             cx.notify();
                         },
                     )))
-                    .child(item("hide", "Hide node").on_click(cx.listener(move |this, _, _, cx| {
+                    .children(node.group.clone().map(|group| {
+                        item("collapse", format!("Collapse community {group}").into()).on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                this.menu = None;
+                                this.graph.update(cx, |g, cx| g.collapse_group(&group, cx));
+                            },
+                        ))
+                    }))
+                    .child(item("hide", "Hide node".into()).on_click(cx.listener(move |this, _, _, cx| {
                         this.menu = None;
                         this.graph.update(cx, |g, cx| g.remove_nodes(&[&hide_id], cx));
                         this.refresh_status(cx);
-                    }))),
-            ),
-        ))
+                    })));
+            }
+            Selection::Group(group) => {
+                let (expand_id, hide_id) = (group.id.clone(), group.id.clone());
+                panel = panel
+                    .child(div().px_2().py_1().text_xs().text_color(t.muted_foreground).child(group.label.clone()))
+                    .child(item("expand-group", "Expand community".into()).on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            this.menu = None;
+                            this.graph.update(cx, |g, cx| g.expand_group(&expand_id, cx));
+                        },
+                    )))
+                    .child(item("hide-group", format!("Hide {} members", group.size).into()).on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            this.menu = None;
+                            this.graph.update(cx, |g, cx| {
+                                let ids: Vec<SharedString> = g.group_members(&hide_id).into_iter().map(|n| n.id).collect();
+                                let ids: Vec<&str> = ids.iter().map(|s| s.as_ref()).collect();
+                                g.remove_nodes(&ids, cx);
+                            });
+                            this.refresh_status(cx);
+                        },
+                    )));
+            }
+            _ => return None,
+        }
+        Some(deferred(anchored().position(menu.position).snap_to_window().child(panel)))
     }
 }
 
@@ -432,6 +570,18 @@ fn button(id: &'static str, label: &'static str, primary: bool, cx: &App) -> But
         .text_color(fg)
         .text_sm()
         .hover(move |s| s.bg(hover))
+        .child(label)
+}
+
+fn small_button(id: &'static str, label: &'static str, cx: &App) -> Button {
+    let t = Theme::global(cx).tokens.colors;
+    Button::new(id)
+        .px_1p5()
+        .py_0p5()
+        .rounded_sm()
+        .text_xs()
+        .text_color(t.muted_foreground)
+        .hover(move |s| s.bg(t.accent).text_color(t.foreground))
         .child(label)
 }
 

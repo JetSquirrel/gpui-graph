@@ -87,3 +87,89 @@ fn pinning_and_data_roundtrip(cx: &mut TestAppContext) {
         assert_eq!(g.node_count(), 0);
     });
 }
+
+fn communities() -> GraphData {
+    GraphData::new(
+        vec![
+            Node::new("a1", "A1", "P").group("A"),
+            Node::new("a2", "A2", "P").group("A"),
+            Node::new("a3", "A3", "P").group("A"),
+            Node::new("b1", "B1", "P").group("B"),
+            Node::new("b2", "B2", "P").group("B"),
+            Node::new("x", "X", "Q"),
+        ],
+        vec![
+            Edge::new("a1", "a2", "R"),
+            Edge::new("a2", "a3", "R"),
+            Edge::new("a1", "b1", "R"),
+            Edge::new("a2", "b1", "R"),
+            Edge::new("b1", "b2", "R"),
+            Edge::new("x", "a3", "R"),
+        ],
+    )
+}
+
+#[gpui::test]
+fn groups_come_from_node_data(cx: &mut TestAppContext) {
+    let graph = cx.new(|cx| NetworkGraph::new(cx).with_data(communities()));
+    graph.read_with(cx, |g, _| {
+        let groups: Vec<_> = g.groups().into_iter().map(|g| (g.id.to_string(), g.size, g.collapsed)).collect();
+        assert_eq!(groups, [("A".into(), 3, false), ("B".into(), 2, false)]);
+        assert_eq!(g.group_members("B").len(), 2);
+    });
+}
+
+#[gpui::test]
+fn collapse_expand_keeps_model_and_emits_events(cx: &mut TestAppContext) {
+    let graph = cx.new(|cx| NetworkGraph::new(cx).with_data(communities()));
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let sink = events.clone();
+    cx.update(|cx| {
+        cx.subscribe(&graph, move |_, e: &GraphEvent, _| sink.borrow_mut().push(e.clone())).detach();
+    });
+
+    graph.update(cx, |g, cx| {
+        g.select_node(Some("a1"), false, cx);
+        g.collapse_group("A", cx);
+        assert!(g.group("A").unwrap().collapsed);
+        // The model is untouched: collapsing only changes what is drawn.
+        assert_eq!((g.node_count(), g.edge_count()), (6, 6));
+        // Selection is kept by identity even while its node is hidden.
+        assert!(matches!(g.selection(), Selection::Node(n) if n.id.as_ref() == "a1"));
+
+        g.collapse_all_groups(cx);
+        g.expand_all_groups(cx);
+        assert!(g.groups().iter().all(|g| !g.collapsed));
+        assert!(matches!(g.selection(), Selection::Node(n) if n.id.as_ref() == "a1"));
+    });
+
+    let toggles: Vec<_> = events
+        .borrow()
+        .iter()
+        .filter_map(|e| match e {
+            GraphEvent::GroupToggled { group, collapsed } => Some((group.to_string(), *collapsed)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(toggles, [("A".into(), true), ("B".into(), true), ("A".into(), false), ("B".into(), false)]);
+}
+
+#[gpui::test]
+fn merge_into_collapsed_group_and_remove_last_member(cx: &mut TestAppContext) {
+    let graph = cx.new(|cx| NetworkGraph::new(cx).with_data(communities()));
+    graph.update(cx, |g, cx| {
+        g.collapse_group("B", cx);
+        g.merge(
+            GraphData::new(vec![Node::new("b3", "B3", "P").group("B")], vec![Edge::new("b3", "x", "R")]),
+            Some("b1"),
+            cx,
+        );
+        let b = g.group("B").unwrap();
+        assert_eq!((b.size, b.collapsed), (3, true));
+
+        g.remove_nodes(&["b1", "b2", "b3"], cx);
+        assert!(g.group("B").is_none());
+        assert_eq!(g.groups().len(), 1);
+        assert_eq!(g.node_count(), 4);
+    });
+}

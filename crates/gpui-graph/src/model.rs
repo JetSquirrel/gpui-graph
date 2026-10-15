@@ -11,7 +11,11 @@ pub struct Node {
     pub category: SharedString,
     /// Arbitrary key/value pairs, carried along for the host app (details panels, tooltips).
     pub properties: Vec<(SharedString, SharedString)>,
-    /// Overrides the category color.
+    /// Community / cluster id, typically computed by the database (Louvain,
+    /// label propagation, ...). Members are drawn together, outlined by a hull,
+    /// and can be collapsed into one node.
+    pub group: Option<SharedString>,
+    /// Overrides the category / group color.
     pub color: Option<Hsla>,
     /// Overrides [`NodeSizing`](crate::NodeSizing) with a fixed radius, in world units.
     pub size: Option<f32>,
@@ -28,6 +32,7 @@ impl Node {
             label: label.into(),
             category: category.into(),
             properties: Vec::new(),
+            group: None,
             color: None,
             size: None,
         }
@@ -35,6 +40,11 @@ impl Node {
 
     pub fn property(mut self, key: impl Into<SharedString>, value: impl Into<SharedString>) -> Self {
         self.properties.push((key.into(), value.into()));
+        self
+    }
+
+    pub fn group(mut self, group: impl Into<SharedString>) -> Self {
+        self.group = Some(group.into());
         self
     }
 

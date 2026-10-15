@@ -101,7 +101,22 @@ impl GraphSource for MemorySource {
 }
 
 /// A small movie graph in the spirit of Neo4j's `:play movies`.
+///
+/// `community` stands in for a value the database computed (e.g. Louvain via
+/// Neo4j GDS `gds.louvain.write`); the UI only reads it.
 pub fn sample_movies() -> GraphData {
+    let community_of_movie = |title: &str| match title {
+        t if t.starts_with("The Matrix") || t == "Cloud Atlas" || t == "V for Vendetta" => "Wachowski",
+        "Inception" | "The Dark Knight" | "Interstellar" => "Nolan",
+        "John Wick" | "Speed" | "The Devil's Advocate" => "Keanu",
+        _ => "Hanks & Ryan",
+    };
+    let community_of_genre = |genre: &str| match genre {
+        "Sci-Fi" => "Wachowski",
+        "Action" => "Keanu",
+        "Thriller" => "Nolan",
+        _ => "Hanks & Ryan",
+    };
     let movies: &[(&str, &str, &[&str])] = &[
         ("The Matrix", "1999", &["Sci-Fi", "Action"]),
         ("The Matrix Reloaded", "2003", &["Sci-Fi", "Action"]),
@@ -162,11 +177,20 @@ pub fn sample_movies() -> GraphData {
     let id = |kind: &str, name: &str| format!("{kind}:{name}");
     let mut genres = Vec::new();
     for (title, year, gs) in movies {
-        data.nodes.push(Node::new(id("movie", title), *title, "Movie").property("released", *year));
+        let community = community_of_movie(title);
+        data.nodes.push(
+            Node::new(id("movie", title), *title, "Movie")
+                .property("released", *year)
+                .property("community", community)
+                .group(community),
+        );
         for g in *gs {
             if !genres.contains(g) {
                 genres.push(*g);
-                data.nodes.push(Node::new(id("genre", g), *g, "Genre"));
+                let community = community_of_genre(g);
+                data.nodes.push(
+                    Node::new(id("genre", g), *g, "Genre").property("community", community).group(community),
+                );
             }
             data.edges.push(Edge::new(id("movie", title), id("genre", g), "IN_GENRE"));
         }
@@ -176,7 +200,13 @@ pub fn sample_movies() -> GraphData {
         for (person, titles) in list {
             if !people.contains(person) {
                 people.push(person);
-                data.nodes.push(Node::new(id("person", person), *person, "Person").property("name", *person));
+                let community = community_of_movie(titles[0]);
+                data.nodes.push(
+                    Node::new(id("person", person), *person, "Person")
+                        .property("name", *person)
+                        .property("community", community)
+                        .group(community),
+                );
             }
             for t in *titles {
                 data.edges.push(Edge::new(id("person", person), id("movie", t), rel));
@@ -190,7 +220,8 @@ pub fn sample_movies() -> GraphData {
     data
 }
 
-/// Preferential-attachment graph so the degree distribution looks like real data.
+/// Preferential attachment inside planted communities, with a few bridges,
+/// so community hulls and collapsing have something to show.
 fn random_graph(n: usize) -> GraphData {
     let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
     let mut rand = move || {
@@ -200,24 +231,34 @@ fn random_graph(n: usize) -> GraphData {
         seed
     };
     let kinds = ["Account", "Device", "IP", "Merchant", "Card"];
+    let communities = (n / 120).clamp(3, 40);
     let mut data = GraphData::default();
-    let mut targets: Vec<usize> = Vec::new();
+    let mut targets: Vec<Vec<usize>> = vec![Vec::new(); communities];
+    let mut all: Vec<usize> = Vec::new();
     for i in 0..n {
         let kind = kinds[(rand() % kinds.len() as u64) as usize];
-        data.nodes.push(Node::new(format!("n{i}"), format!("{kind} {i}"), kind).property("index", i.to_string()));
-        if i == 0 {
-            targets.push(0);
-            continue;
-        }
+        let c = (rand() % communities as u64) as usize;
+        let community = format!("C{c}");
+        data.nodes.push(
+            Node::new(format!("n{i}"), format!("{kind} {i}"), kind)
+                .property("community", community.clone())
+                .group(community),
+        );
         let links = 1 + (rand() % 2) as usize;
         for _ in 0..links {
-            let t = targets[(rand() % targets.len() as u64) as usize];
+            // Mostly inside the community; ~5% bridge to anywhere.
+            let pool = if rand() % 20 == 0 || targets[c].is_empty() { &all } else { &targets[c] };
+            if pool.is_empty() {
+                break;
+            }
+            let t = pool[(rand() % pool.len() as u64) as usize];
             if t != i {
                 data.edges.push(Edge::new(format!("n{i}"), format!("n{t}"), "LINKS"));
-                targets.push(t);
+                targets[c].push(t);
             }
         }
-        targets.push(i);
+        targets[c].push(i);
+        all.push(i);
     }
     data
 }

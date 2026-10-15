@@ -95,6 +95,60 @@ impl EdgeGeometry {
     }
 }
 
+/// Convex hull (Andrew's monotone chain), counter-clockwise, without repeats.
+pub(crate) fn convex_hull(mut pts: Vec<(f32, f32)>) -> Vec<(f32, f32)> {
+    pts.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    pts.dedup();
+    if pts.len() < 3 {
+        return pts;
+    }
+    let cross = |o: (f32, f32), a: (f32, f32), b: (f32, f32)| (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0);
+    let mut hull: Vec<(f32, f32)> = Vec::with_capacity(pts.len() * 2);
+    for pass in 0..2 {
+        let start = hull.len();
+        let iter: Box<dyn Iterator<Item = &(f32, f32)>> =
+            if pass == 0 { Box::new(pts.iter()) } else { Box::new(pts.iter().rev()) };
+        for &p in iter {
+            while hull.len() >= start + 2 && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0. {
+                hull.pop();
+            }
+            hull.push(p);
+        }
+        hull.pop();
+    }
+    hull
+}
+
+/// Hull around a set of circles, inflated by `padding`.
+pub(crate) fn circles_hull(circles: &[(Point<Pixels>, f32)], padding: f32) -> Vec<(f32, f32)> {
+    const SAMPLES: usize = 12;
+    let mut pts = Vec::with_capacity(circles.len() * SAMPLES);
+    for &(c, r) in circles {
+        let r = r + padding;
+        for k in 0..SAMPLES {
+            let a = k as f32 / SAMPLES as f32 * std::f32::consts::TAU;
+            pts.push((c.x.as_f32() + r * a.cos(), c.y.as_f32() + r * a.sin()));
+        }
+    }
+    convex_hull(pts)
+}
+
+/// A closed path through the midpoints of `pts`, using each vertex as a
+/// control point, which rounds every corner of the polygon.
+pub(crate) fn smooth_closed(path: &mut PathBuilder, pts: &[(f32, f32)]) {
+    let n = pts.len();
+    if n < 3 {
+        return;
+    }
+    let mid = |a: (f32, f32), b: (f32, f32)| point(px((a.0 + b.0) / 2.), px((a.1 + b.1) / 2.));
+    path.move_to(mid(pts[n - 1], pts[0]));
+    for i in 0..n {
+        let next = pts[(i + 1) % n];
+        path.curve_to(mid(pts[i], next), point(px(pts[i].0), px(pts[i].1)));
+    }
+    path.close();
+}
+
 fn dist(p: Point<Pixels>, q: Point<Pixels>) -> f32 {
     (q.x - p.x).as_f32().hypot((q.y - p.y).as_f32())
 }
@@ -110,6 +164,14 @@ fn point_segment_distance(p: Point<Pixels>, a: Point<Pixels>, b: Point<Pixels>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hull_drops_interior_points() {
+        let pts = vec![(0., 0.), (10., 0.), (10., 10.), (0., 10.), (5., 5.), (2., 7.)];
+        let hull = convex_hull(pts);
+        assert_eq!(hull.len(), 4);
+        assert!(!hull.contains(&(5., 5.)));
+    }
 
     #[test]
     fn curve_distance_hits_midpoint() {

@@ -1,17 +1,20 @@
+mod paint;
+mod visual;
+
 use std::{cell::Cell, collections::HashMap, rc::Rc};
 
 use gpui::{
-    AnyElement, App, BorderStyle, Bounds, ContentMask, Context, CursorStyle, DispatchPhase, Entity,
-    EventEmitter, FontWeight, Hitbox, HitboxBehavior, Hsla, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PathBuilder, Pixels, Point,
-    Render, ScrollWheelEvent, SharedString, ShapedLine, Styled as _, TextAlign, TextRun, Window,
-    canvas, div, point, px, quad, size,
+    AnyElement, App, Bounds, ContentMask, Context, CursorStyle, DispatchPhase, Entity,
+    EventEmitter, Hitbox, HitboxBehavior, Hsla, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollWheelEvent,
+    SharedString, Styled as _, Window, canvas, div, point, px,
 };
 
-use crate::geometry::{EdgeGeometry, draw_self_loop, segment_may_intersect};
+use crate::geometry::EdgeGeometry;
 use crate::layout::{Body, ForceConfig, Simulation, Vec2};
 use crate::model::{Edge, GraphData, Node};
-use crate::style::{GraphColors, LabelMode, NodeSizing, Palette};
+use crate::style::{ColorBy, GraphColors, LabelMode, NodeSizing, Palette};
+use visual::{GroupInput, Vertex, Visual};
 
 const MIN_ZOOM: f32 = 0.05;
 const MAX_ZOOM: f32 = 6.;
@@ -22,18 +25,26 @@ const EDGE_HIT_SLOP: f32 = 4.;
 
 /// What the user has selected or is pointing at.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub enum Selection {
     #[default]
     None,
     Node(Node),
     Edge(Edge),
+    /// Several edges drawn as one, e.g. from a node into a collapsed group.
+    EdgeBundle(Vec<Edge>),
+    /// A collapsed group's super node.
+    Group(GroupInfo),
 }
 
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum GraphEvent {
     SelectionChanged(Selection),
     /// Double-click on a node: the usual "expand neighbors" gesture in graph explorers.
     NodeActivated(Node),
+    /// A group was collapsed or expanded, by the user or through the API.
+    GroupToggled { group: SharedString, collapsed: bool },
     /// Right-click. `position` is in window coordinates, ready for a popover anchor.
     ContextMenu { target: Selection, position: Point<Pixels> },
 }
@@ -46,26 +57,57 @@ pub struct CategoryInfo {
     pub count: usize,
 }
 
-/// Builds tooltip content for the hovered item; `None` hides the tooltip.
-pub type TooltipBuilder = Rc<dyn Fn(&Selection, &GraphColors, &mut Window, &mut App) -> Option<AnyElement>>;
+/// A group (community) present in the graph.
+#[derive(Clone, Debug)]
+pub struct GroupInfo {
+    pub id: SharedString,
+    pub label: SharedString,
+    pub color: Hsla,
+    /// Number of member nodes.
+    pub size: usize,
+    pub collapsed: bool,
+}
 
+/// Builds tooltip content for the hovered item; `None` hides the tooltip.
+pub type TooltipBuilder =
+    Rc<dyn Fn(&Selection, &GraphColors, &mut Window, &mut App) -> Option<AnyElement>>;
+
+/// A hovered / hit item, by index into the visual graph. Transient.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Item {
-    Node(usize),
+    Vertex(usize),
     Edge(usize),
 }
 
-struct EdgeItem {
+/// A selected item by stable identity, so it survives collapse/expand and merges.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SelectionKey {
+    Node(SharedString),
+    Group(SharedString),
+    /// Model edge indices of the selected visual edge.
+    Edges(Vec<usize>),
+}
+
+struct ModelEdge {
     data: Edge,
     source: usize,
     target: usize,
-    /// Signed bend for parallel edges between the same pair (0 = straight).
-    curvature: f32,
+}
+
+struct GroupState {
+    id: SharedString,
+    label: SharedString,
+    members: Vec<usize>,
+    collapsed: bool,
+    /// Super node body while collapsed.
+    body: Body,
+    /// Members' centroid when collapsed; expanding moves them by the super node's travel.
+    anchor: Vec2,
 }
 
 enum DragKind {
     Pan { start_pan: Point<Pixels> },
-    Node { index: usize, was_pinned: bool },
+    Vertex { index: usize, was_pinned: bool },
 }
 
 struct Drag {
@@ -87,14 +129,20 @@ struct Drag {
 ///
 /// Place it in a sized container: it fills its parent.
 pub struct NetworkGraph {
+    // Model: every node and edge, with persisted positions.
     nodes: Vec<Node>,
-    bodies: Vec<Body>,
-    edges: Vec<EdgeItem>,
-    links: Vec<(usize, usize)>,
+    node_bodies: Vec<Body>,
+    edges: Vec<ModelEdge>,
+    index: HashMap<SharedString, usize>,
     degrees: Vec<usize>,
     neighbors: Vec<Vec<usize>>,
-    index: HashMap<SharedString, usize>,
     categories: Vec<SharedString>,
+    groups: Vec<GroupState>,
+    group_index: HashMap<SharedString, usize>,
+    node_group: Vec<Option<usize>>,
+
+    // What is drawn and simulated.
+    vis: Visual,
     sim: Simulation,
 
     /// Screen position = bounds.center + pan + world * zoom.
@@ -105,13 +153,15 @@ pub struct NetworkGraph {
     bounds: Rc<Cell<Bounds<Pixels>>>,
 
     hovered: Option<Item>,
-    selected: Option<Item>,
+    selected: Option<SelectionKey>,
     drag: Option<Drag>,
     pointer: Option<Point<Pixels>>,
 
     label_mode: LabelMode,
+    color_by: ColorBy,
     show_arrows: bool,
     show_edge_labels: bool,
+    show_group_hulls: bool,
     /// Dragged nodes stay where they are dropped.
     pin_on_drag: bool,
     palette: Palette,
@@ -127,13 +177,16 @@ impl NetworkGraph {
     pub fn new(_cx: &mut Context<Self>) -> Self {
         Self {
             nodes: Vec::new(),
-            bodies: Vec::new(),
+            node_bodies: Vec::new(),
             edges: Vec::new(),
-            links: Vec::new(),
+            index: HashMap::new(),
             degrees: Vec::new(),
             neighbors: Vec::new(),
-            index: HashMap::new(),
             categories: Vec::new(),
+            groups: Vec::new(),
+            group_index: HashMap::new(),
+            node_group: Vec::new(),
+            vis: Visual::default(),
             sim: Simulation::new(ForceConfig::default()),
             pan: Point::default(),
             zoom: 1.,
@@ -144,8 +197,10 @@ impl NetworkGraph {
             drag: None,
             pointer: None,
             label_mode: LabelMode::default(),
+            color_by: ColorBy::default(),
             show_arrows: true,
             show_edge_labels: true,
+            show_group_hulls: true,
             pin_on_drag: false,
             palette: Palette::default(),
             sizing: NodeSizing::default(),
@@ -158,7 +213,7 @@ impl NetworkGraph {
     // ---- construction options -----------------------------------------------
 
     pub fn with_data(mut self, data: GraphData) -> Self {
-        self.load(data, None);
+        self.load(data);
         self
     }
 
@@ -172,6 +227,11 @@ impl NetworkGraph {
         self
     }
 
+    pub fn with_color_by(mut self, color_by: ColorBy) -> Self {
+        self.color_by = color_by;
+        self
+    }
+
     pub fn with_arrows(mut self, show: bool) -> Self {
         self.show_arrows = show;
         self
@@ -179,6 +239,12 @@ impl NetworkGraph {
 
     pub fn with_edge_labels(mut self, show: bool) -> Self {
         self.show_edge_labels = show;
+        self
+    }
+
+    /// Outline each expanded group with a rounded hull (default on).
+    pub fn with_group_hulls(mut self, show: bool) -> Self {
+        self.show_group_hulls = show;
         self
     }
 
@@ -228,6 +294,15 @@ impl NetworkGraph {
         cx.notify();
     }
 
+    pub fn color_by(&self) -> ColorBy {
+        self.color_by
+    }
+
+    pub fn set_color_by(&mut self, color_by: ColorBy, cx: &mut Context<Self>) {
+        self.color_by = color_by;
+        cx.notify();
+    }
+
     pub fn show_arrows(&self) -> bool {
         self.show_arrows
     }
@@ -243,6 +318,15 @@ impl NetworkGraph {
 
     pub fn set_show_edge_labels(&mut self, show: bool, cx: &mut Context<Self>) {
         self.show_edge_labels = show;
+        cx.notify();
+    }
+
+    pub fn show_group_hulls(&self) -> bool {
+        self.show_group_hulls
+    }
+
+    pub fn set_show_group_hulls(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.show_group_hulls = show;
         cx.notify();
     }
 
@@ -266,7 +350,7 @@ impl NetworkGraph {
     /// Replace the whole graph (a new query result) and reset the viewport.
     pub fn set_data(&mut self, data: GraphData, cx: &mut Context<Self>) {
         let had_selection = self.selected.is_some();
-        self.load(data, None);
+        self.load(data);
         if had_selection {
             cx.emit(GraphEvent::SelectionChanged(Selection::None));
         }
@@ -275,7 +359,9 @@ impl NetworkGraph {
 
     /// Add nodes and edges to the current graph, e.g. expanding a node. Existing
     /// ids are kept; new nodes start around `anchor` so the layout stays stable.
+    /// New members of a collapsed group join it without expanding it.
     pub fn merge(&mut self, data: GraphData, anchor: Option<&str>, cx: &mut Context<Self>) {
+        self.sync_back();
         self.insert(data, anchor);
         cx.notify();
     }
@@ -286,29 +372,19 @@ impl NetworkGraph {
         if !doomed.contains(&true) {
             return;
         }
-        let selection_lost = match self.selected {
-            Some(Item::Node(i)) => doomed[i],
-            Some(Item::Edge(e)) => doomed[self.edges[e].source] || doomed[self.edges[e].target],
-            None => false,
-        };
-        let selected_id = self.selected_node_id();
-        let selected_edge = match self.selected {
-            Some(Item::Edge(e)) if !selection_lost => Some((self.edges[e].data.source.clone(), self.edges[e].data.target.clone(), self.edges[e].data.label.clone())),
-            _ => None,
-        };
-
+        self.sync_back();
         let mut remap = vec![usize::MAX; self.nodes.len()];
-        let mut nodes = Vec::new();
-        let mut bodies = Vec::new();
-        for (i, (node, body)) in self.nodes.drain(..).zip(self.bodies.drain(..)).enumerate() {
-            if !doomed[i] {
-                remap[i] = nodes.len();
-                nodes.push(node);
-                bodies.push(body);
+        let mut kept = 0;
+        for (i, &d) in doomed.iter().enumerate() {
+            if !d {
+                remap[i] = kept;
+                kept += 1;
             }
         }
-        self.nodes = nodes;
-        self.bodies = bodies;
+        let mut i = 0;
+        self.nodes.retain(|_| (!doomed[i], i += 1).0);
+        let mut i = 0;
+        self.node_bodies.retain(|_| (!doomed[i], i += 1).0);
         self.edges.retain_mut(|e| {
             let keep = !doomed[e.source] && !doomed[e.target];
             e.source = remap[e.source];
@@ -317,25 +393,13 @@ impl NetworkGraph {
         });
         self.index = self.nodes.iter().enumerate().map(|(i, n)| (n.id.clone(), i)).collect();
         self.categories.retain(|c| self.nodes.iter().any(|n| &n.category == c));
-        self.hovered = None;
-        self.drag = None;
-        self.selected = if selection_lost {
-            None
-        } else if let Some(id) = selected_id {
-            self.index.get(&id).map(|&i| Item::Node(i))
-        } else {
-            selected_edge.and_then(|(s, t, l)| {
-                self.edges
-                    .iter()
-                    .position(|e| e.data.source == s && e.data.target == t && e.data.label == l)
-                    .map(Item::Edge)
-            })
-        };
-        self.rebuild_topology();
-        self.sim.reheat(0.3);
-        if selection_lost {
-            cx.emit(GraphEvent::SelectionChanged(Selection::None));
+        // Model edge indices shifted; an edge selection cannot be carried over.
+        if matches!(self.selected, Some(SelectionKey::Edges(_))) {
+            self.selected = None;
         }
+        self.rebuild();
+        self.sim.reheat(0.3);
+        self.validate_selection(cx);
         cx.notify();
     }
 
@@ -343,7 +407,7 @@ impl NetworkGraph {
         self.set_data(GraphData::default(), cx);
     }
 
-    /// The current graph contents, e.g. for export.
+    /// The current graph contents (including nodes inside collapsed groups).
     pub fn data(&self) -> GraphData {
         GraphData {
             nodes: self.nodes.clone(),
@@ -351,23 +415,29 @@ impl NetworkGraph {
         }
     }
 
-    fn load(&mut self, data: GraphData, anchor: Option<&str>) {
+    fn load(&mut self, data: GraphData) {
         self.nodes.clear();
-        self.bodies.clear();
+        self.node_bodies.clear();
         self.edges.clear();
         self.index.clear();
         self.categories.clear();
+        self.groups.clear();
+        self.group_index.clear();
+        self.vis = Visual::default();
         self.hovered = None;
         self.selected = None;
         self.drag = None;
-        self.insert(data, anchor);
+        self.insert(data, None);
         self.pan = Point::default();
         self.zoom = 1.;
         self.auto_fit = true;
     }
 
+    /// Requires the model to be in sync with the visual graph (see `sync_back`).
     fn insert(&mut self, data: GraphData, anchor: Option<&str>) {
-        let anchor_pos = anchor.and_then(|id| self.index.get(id)).map(|&i| self.bodies[i].pos);
+        let anchor_pos = anchor
+            .and_then(|id| self.index.get(id))
+            .map(|&i| self.vis.bodies[self.vis.node_slot[i]].pos);
         let first_new = self.nodes.len();
         for node in data.nodes {
             if self.index.contains_key(&node.id) {
@@ -378,71 +448,105 @@ impl NetworkGraph {
             }
             self.index.insert(node.id.clone(), self.nodes.len());
             self.nodes.push(node);
-            self.bodies.push(Body::default());
+            self.node_bodies.push(Body::default());
         }
         match anchor_pos {
             Some(center) => {
                 let added = self.nodes.len() - first_new;
-                for (k, body) in self.bodies[first_new..].iter_mut().enumerate() {
+                for (k, body) in self.node_bodies[first_new..].iter_mut().enumerate() {
                     let a = k as f32 / added.max(1) as f32 * std::f32::consts::TAU;
                     body.pos = Vec2::new(center.x + 30. * a.cos(), center.y + 30. * a.sin());
                 }
             }
-            None => Simulation::initialize_positions(&mut self.bodies, first_new),
+            None => Simulation::initialize_positions(&mut self.node_bodies, first_new),
         }
 
         for edge in data.edges {
             let (Some(&s), Some(&t)) = (self.index.get(&edge.source), self.index.get(&edge.target)) else {
                 continue;
             };
-            let duplicate = self.edges.iter().any(|e| {
-                e.source == s && e.target == t && e.data.label == edge.label
-            });
+            let duplicate = self.edges.iter().any(|e| e.source == s && e.target == t && e.data.label == edge.label);
             if !duplicate {
-                self.edges.push(EdgeItem { data: edge, source: s, target: t, curvature: 0. });
+                self.edges.push(ModelEdge { data: edge, source: s, target: t });
             }
         }
-        self.rebuild_topology();
+        self.rebuild();
         self.sim.reheat(if anchor_pos.is_some() { 0.5 } else { 1. });
     }
 
-    fn rebuild_topology(&mut self) {
+    /// Persist simulated positions from the visual graph into the model.
+    fn sync_back(&mut self) {
+        for (v, vertex) in self.vis.vertices.iter().enumerate() {
+            let body = self.vis.bodies[v].clone();
+            match *vertex {
+                Vertex::Node(i) => self.node_bodies[i] = body,
+                Vertex::Group(g) => self.groups[g].body = body,
+            }
+        }
+    }
+
+    /// Recompute model topology and groups, then the visual graph.
+    fn rebuild(&mut self) {
         let n = self.nodes.len();
-        self.links = self.edges.iter().map(|e| (e.source, e.target)).collect();
         self.degrees = vec![0; n];
         self.neighbors = vec![Vec::new(); n];
-        for &(s, t) in &self.links {
-            self.degrees[s] += 1;
-            self.degrees[t] += 1;
-            if s != t {
-                self.neighbors[s].push(t);
-                self.neighbors[t].push(s);
+        for e in &self.edges {
+            self.degrees[e.source] += 1;
+            self.degrees[e.target] += 1;
+            if e.source != e.target {
+                self.neighbors[e.source].push(e.target);
+                self.neighbors[e.target].push(e.source);
             }
         }
         for list in &mut self.neighbors {
             list.sort_unstable();
             list.dedup();
         }
-        for (i, body) in self.bodies.iter_mut().enumerate() {
+        for (i, body) in self.node_bodies.iter_mut().enumerate() {
             body.radius = self.nodes[i].size.unwrap_or_else(|| self.sizing.radius(self.degrees[i]));
         }
-        // Fan out parallel edges so multi-relationships stay distinguishable.
-        let mut groups: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
-        for (i, e) in self.edges.iter().enumerate() {
-            groups.entry((e.source.min(e.target), e.source.max(e.target))).or_default().push(i);
+
+        // Groups keep their state (collapsed, position, label) across rebuilds.
+        for g in &mut self.groups {
+            g.members.clear();
         }
-        for list in groups.values() {
-            let count = list.len() as f32;
-            for (k, &i) in list.iter().enumerate() {
-                let e = &mut self.edges[i];
-                let mut c = if count > 1. { k as f32 - (count - 1.) / 2. } else { 0. };
-                // Normalise direction so A->B and B->A bend to opposite sides.
-                if e.source > e.target {
-                    c = -c;
-                }
-                e.curvature = c;
+        self.node_group = vec![None; n];
+        for (i, node) in self.nodes.iter().enumerate() {
+            let Some(id) = &node.group else { continue };
+            let g = *self.group_index.entry(id.clone()).or_insert_with(|| {
+                self.groups.push(GroupState {
+                    id: id.clone(),
+                    label: id.clone(),
+                    members: Vec::new(),
+                    collapsed: false,
+                    body: Body::default(),
+                    anchor: Vec2::default(),
+                });
+                self.groups.len() - 1
+            });
+            self.groups[g].members.push(i);
+            self.node_group[i] = Some(g);
+        }
+        if self.groups.iter().any(|g| g.members.is_empty()) {
+            self.groups.retain(|g| !g.members.is_empty());
+            self.group_index = self.groups.iter().enumerate().map(|(g, s)| (s.id.clone(), g)).collect();
+            for (i, node) in self.nodes.iter().enumerate() {
+                self.node_group[i] = node.group.as_ref().map(|id| self.group_index[id]);
             }
         }
+        for g in &mut self.groups {
+            g.body.radius = (12. + (g.members.len() as f32).sqrt() * 3.).min(48.);
+        }
+
+        let groups: Vec<GroupInput> = self
+            .groups
+            .iter()
+            .map(|g| GroupInput { collapsed: g.collapsed, body: &g.body })
+            .collect();
+        let links: Vec<(usize, usize)> = self.edges.iter().map(|e| (e.source, e.target)).collect();
+        self.vis = Visual::build(&self.node_bodies, &self.node_group, &groups, &links);
+        self.hovered = None;
+        self.drag = None;
     }
 
     // ---- queries ------------------------------------------------------------
@@ -492,16 +596,46 @@ impl NetworkGraph {
             .collect()
     }
 
+    pub fn groups(&self) -> Vec<GroupInfo> {
+        (0..self.groups.len()).map(|g| self.group_info(g)).collect()
+    }
+
+    pub fn group(&self, id: &str) -> Option<GroupInfo> {
+        self.group_index.get(id).map(|&g| self.group_info(g))
+    }
+
+    /// Member nodes of a group.
+    pub fn group_members(&self, id: &str) -> Vec<Node> {
+        self.group_index
+            .get(id)
+            .map(|&g| self.groups[g].members.iter().map(|&i| self.nodes[i].clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// The color a node is painted with.
     pub fn color_of(&self, node: &Node) -> Hsla {
-        node.color.unwrap_or_else(|| {
-            let ix = self.categories.iter().position(|c| c == &node.category).unwrap_or(0);
-            self.palette.get(ix)
-        })
+        if let Some(c) = node.color {
+            return c;
+        }
+        match self.color_by {
+            ColorBy::Category => {
+                let ix = self.categories.iter().position(|c| c == &node.category).unwrap_or(0);
+                self.palette.get(ix)
+            }
+            ColorBy::Group => match node.group.as_ref().and_then(|g| self.group_index.get(g)) {
+                Some(&g) => self.group_color(g),
+                None => gpui::hsla(0., 0., 0.62, 1.),
+            },
+        }
     }
 
     pub fn selection(&self) -> Selection {
-        self.item_selection(self.selected)
+        match &self.selected {
+            None => Selection::None,
+            Some(SelectionKey::Node(id)) => self.node(id).cloned().map_or(Selection::None, Selection::Node),
+            Some(SelectionKey::Group(id)) => self.group(id).map_or(Selection::None, Selection::Group),
+            Some(SelectionKey::Edges(edges)) => self.edge_selection(edges),
+        }
     }
 
     pub fn zoom(&self) -> f32 {
@@ -513,18 +647,68 @@ impl NetworkGraph {
         self.sim.is_active()
     }
 
-    fn item_selection(&self, item: Option<Item>) -> Selection {
-        match item {
-            None => Selection::None,
-            Some(Item::Node(i)) => Selection::Node(self.nodes[i].clone()),
-            Some(Item::Edge(e)) => Selection::Edge(self.edges[e].data.clone()),
+    fn group_info(&self, g: usize) -> GroupInfo {
+        let s = &self.groups[g];
+        GroupInfo {
+            id: s.id.clone(),
+            label: s.label.clone(),
+            color: self.group_color(g),
+            size: s.members.len(),
+            collapsed: s.collapsed,
         }
     }
 
-    fn selected_node_id(&self) -> Option<SharedString> {
-        match self.selected {
-            Some(Item::Node(i)) => Some(self.nodes[i].id.clone()),
-            _ => None,
+    fn group_color(&self, g: usize) -> Hsla {
+        self.palette.get(g)
+    }
+
+    fn edge_selection(&self, edges: &[usize]) -> Selection {
+        match edges {
+            [] => Selection::None,
+            [e] => Selection::Edge(self.edges[*e].data.clone()),
+            many => Selection::EdgeBundle(many.iter().map(|&e| self.edges[e].data.clone()).collect()),
+        }
+    }
+
+    fn key_of(&self, item: Item) -> SelectionKey {
+        match item {
+            Item::Vertex(v) => match self.vis.vertices[v] {
+                Vertex::Node(i) => SelectionKey::Node(self.nodes[i].id.clone()),
+                Vertex::Group(g) => SelectionKey::Group(self.groups[g].id.clone()),
+            },
+            Item::Edge(e) => SelectionKey::Edges(self.vis.edges[e].edges.clone()),
+        }
+    }
+
+    fn item_selection(&self, item: Item) -> Selection {
+        match item {
+            Item::Vertex(v) => match self.vis.vertices[v] {
+                Vertex::Node(i) => Selection::Node(self.nodes[i].clone()),
+                Vertex::Group(g) => Selection::Group(self.group_info(g)),
+            },
+            Item::Edge(e) => self.edge_selection(&self.vis.edges[e].edges),
+        }
+    }
+
+    /// The selection as a visual item, if it is currently drawn.
+    fn selected_item(&self) -> Option<Item> {
+        match self.selected.as_ref()? {
+            SelectionKey::Node(id) => {
+                let slot = self.vis.node_slot[*self.index.get(id)?];
+                matches!(self.vis.vertices[slot], Vertex::Node(_)).then_some(Item::Vertex(slot))
+            }
+            SelectionKey::Group(id) => self.vis.group_slot[*self.group_index.get(id)?].map(Item::Vertex),
+            SelectionKey::Edges(edges) => {
+                self.vis.edges.iter().position(|e| &e.edges == edges).map(Item::Edge)
+            }
+        }
+    }
+
+    /// Drop a selection whose target no longer exists, notifying listeners.
+    fn validate_selection(&mut self, cx: &mut Context<Self>) {
+        if self.selected.is_some() && matches!(self.selection(), Selection::None) {
+            self.selected = None;
+            cx.emit(GraphEvent::SelectionChanged(Selection::None));
         }
     }
 
@@ -532,45 +716,150 @@ impl NetworkGraph {
 
     /// Select a node by id (`None` clears), optionally centering it.
     pub fn select_node(&mut self, id: Option<&str>, center: bool, cx: &mut Context<Self>) {
-        let item = id.and_then(|id| self.index.get(id).copied()).map(Item::Node);
-        if let (Some(Item::Node(i)), true) = (item, center) {
-            let p = self.bodies[i].pos;
-            self.auto_fit = false;
-            self.pan = point(px(-p.x * self.zoom), px(-p.y * self.zoom));
-            cx.notify();
+        let key = id.filter(|id| self.index.contains_key(*id)).map(|id| SelectionKey::Node(id.to_string().into()));
+        if let (Some(id), true) = (id, center) {
+            if let Some(&i) = self.index.get(id) {
+                let p = self.vis.bodies[self.vis.node_slot[i]].pos;
+                self.auto_fit = false;
+                self.pan = point(px(-p.x * self.zoom), px(-p.y * self.zoom));
+                cx.notify();
+            }
         }
-        self.set_selected(item, cx);
+        self.set_selected(key, cx);
     }
 
-    fn set_selected(&mut self, item: Option<Item>, cx: &mut Context<Self>) {
-        if item == self.selected {
+    fn set_selected(&mut self, key: Option<SelectionKey>, cx: &mut Context<Self>) {
+        if key == self.selected {
             return;
         }
-        self.selected = item;
-        cx.emit(GraphEvent::SelectionChanged(self.item_selection(item)));
+        self.selected = key;
+        cx.emit(GraphEvent::SelectionChanged(self.selection()));
         cx.notify();
     }
 
     /// Pin or release a node at its current position.
     pub fn set_pinned(&mut self, id: &str, pinned: bool, cx: &mut Context<Self>) {
-        if let Some(&i) = self.index.get(id) {
-            self.bodies[i].fixed = pinned.then_some(self.bodies[i].pos);
-            self.sim.reheat(0.1);
-            cx.notify();
+        let Some(&i) = self.index.get(id) else { return };
+        let v = self.vis.node_slot[i];
+        if matches!(self.vis.vertices[v], Vertex::Node(_)) {
+            let body = &mut self.vis.bodies[v];
+            body.fixed = pinned.then_some(body.pos);
+        } else {
+            let body = &mut self.node_bodies[i];
+            body.fixed = pinned.then_some(body.pos);
         }
+        self.sim.reheat(0.1);
+        cx.notify();
     }
 
     pub fn is_pinned(&self, id: &str) -> bool {
-        self.index.get(id).is_some_and(|&i| self.bodies[i].fixed.is_some())
+        self.index.get(id).is_some_and(|&i| {
+            let v = self.vis.node_slot[i];
+            match self.vis.vertices[v] {
+                Vertex::Node(_) => self.vis.bodies[v].fixed.is_some(),
+                Vertex::Group(_) => self.node_bodies[i].fixed.is_some(),
+            }
+        })
     }
 
     pub fn unpin_all(&mut self, cx: &mut Context<Self>) {
-        for b in &mut self.bodies {
+        for b in self.vis.bodies.iter_mut().chain(&mut self.node_bodies) {
             b.fixed = None;
         }
         self.sim.reheat(0.3);
         cx.notify();
     }
+
+    // ---- groups -------------------------------------------------------------
+
+    /// Collapse a group into a single super node.
+    pub fn collapse_group(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.set_groups_collapsed(|g| g.id.as_ref() == id, true, cx);
+    }
+
+    pub fn expand_group(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.set_groups_collapsed(|g| g.id.as_ref() == id, false, cx);
+    }
+
+    pub fn toggle_group(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(&g) = self.group_index.get(id) {
+            let collapse = !self.groups[g].collapsed;
+            self.set_groups_collapsed(|s| s.id.as_ref() == id, collapse, cx);
+        }
+    }
+
+    /// Community overview: every group becomes one node.
+    pub fn collapse_all_groups(&mut self, cx: &mut Context<Self>) {
+        self.set_groups_collapsed(|_| true, true, cx);
+    }
+
+    pub fn expand_all_groups(&mut self, cx: &mut Context<Self>) {
+        self.set_groups_collapsed(|_| true, false, cx);
+    }
+
+    pub fn set_group_label(&mut self, id: &str, label: impl Into<SharedString>, cx: &mut Context<Self>) {
+        if let Some(&g) = self.group_index.get(id) {
+            self.groups[g].label = label.into();
+            cx.notify();
+        }
+    }
+
+    fn set_groups_collapsed(
+        &mut self,
+        filter: impl Fn(&GroupState) -> bool,
+        collapse: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let targets: Vec<usize> = (0..self.groups.len())
+            .filter(|&g| filter(&self.groups[g]) && self.groups[g].collapsed != collapse)
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        self.sync_back();
+        for &g in &targets {
+            let members = self.groups[g].members.clone();
+            if collapse {
+                let n = members.len().max(1) as f32;
+                let (sx, sy) = members.iter().fold((0., 0.), |(x, y), &i| {
+                    (x + self.node_bodies[i].pos.x, y + self.node_bodies[i].pos.y)
+                });
+                let centroid = Vec2::new(sx / n, sy / n);
+                let group = &mut self.groups[g];
+                group.anchor = centroid;
+                group.body.pos = centroid;
+                group.body.vel = Vec2::default();
+                group.body.fixed = None;
+            } else {
+                let group = &self.groups[g];
+                let (dx, dy) = (group.body.pos.x - group.anchor.x, group.body.pos.y - group.anchor.y);
+                for i in members {
+                    let b = &mut self.node_bodies[i];
+                    b.pos = Vec2::new(b.pos.x + dx, b.pos.y + dy);
+                    b.vel = Vec2::default();
+                    if let Some(f) = b.fixed {
+                        b.fixed = Some(Vec2::new(f.x + dx, f.y + dy));
+                    }
+                }
+            }
+            self.groups[g].collapsed = collapse;
+        }
+        // A selected super node no longer exists once expanded.
+        if let (false, Some(SelectionKey::Group(id))) = (collapse, &self.selected) {
+            if targets.iter().any(|&g| &self.groups[g].id == id) {
+                self.selected = None;
+                cx.emit(GraphEvent::SelectionChanged(Selection::None));
+            }
+        }
+        self.rebuild();
+        self.sim.reheat(0.4);
+        for g in targets {
+            cx.emit(GraphEvent::GroupToggled { group: self.groups[g].id.clone(), collapsed: collapse });
+        }
+        cx.notify();
+    }
+
+    // ---- viewport -----------------------------------------------------------
 
     /// Fit everything into view and keep fitting while the layout settles.
     pub fn fit_view(&mut self, cx: &mut Context<Self>) {
@@ -588,10 +877,10 @@ impl NetworkGraph {
 
     /// Restart the layout from scratch (d3 `simulation.alpha(1).restart()`).
     pub fn relayout(&mut self, cx: &mut Context<Self>) {
-        for b in &mut self.bodies {
+        for b in &mut self.vis.bodies {
             b.fixed = None;
         }
-        Simulation::initialize_positions(&mut self.bodies, 0);
+        Simulation::initialize_positions(&mut self.vis.bodies, 0);
         self.sim.reheat(1.);
         self.auto_fit = true;
         cx.notify();
@@ -599,11 +888,11 @@ impl NetworkGraph {
 
     fn apply_fit(&mut self, blend: f32) {
         let bounds = self.bounds.get();
-        if self.bodies.is_empty() || bounds.size.width <= px(0.) {
+        if self.vis.bodies.is_empty() || bounds.size.width <= px(0.) {
             return;
         }
         let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-        for b in &self.bodies {
+        for b in &self.vis.bodies {
             x0 = x0.min(b.pos.x - b.radius);
             y0 = y0.min(b.pos.y - b.radius);
             x1 = x1.max(b.pos.x + b.radius);
@@ -635,34 +924,35 @@ impl NetworkGraph {
         Vec2::new(local.x.as_f32() / self.zoom, local.y.as_f32() / self.zoom)
     }
 
-    fn edge_geometry(&self, e: &EdgeItem) -> EdgeGeometry {
-        let a = self.to_screen(self.bodies[e.source].pos);
-        let b = self.to_screen(self.bodies[e.target].pos);
+    fn edge_geometry(&self, e: usize) -> EdgeGeometry {
+        let e = &self.vis.edges[e];
+        let a = self.to_screen(self.vis.bodies[e.source].pos);
+        let b = self.to_screen(self.vis.bodies[e.target].pos);
         EdgeGeometry::new(a, b, e.curvature * 28. * self.zoom.min(1.5))
     }
 
     fn hit_test(&self, p: Point<Pixels>) -> Option<Item> {
         let w = self.to_world(p);
         let slop = 3. / self.zoom;
-        // Topmost first: nodes are painted in index order, above edges.
-        let node = self.bodies.iter().enumerate().rev().find_map(|(i, b)| {
+        // Topmost first: vertices are painted in index order, above edges.
+        let vertex = self.vis.bodies.iter().enumerate().rev().find_map(|(i, b)| {
             let (dx, dy) = (b.pos.x - w.x, b.pos.y - w.y);
             let r = b.radius + slop;
             (dx * dx + dy * dy <= r * r).then_some(i)
         });
-        if let Some(i) = node {
-            return Some(Item::Node(i));
+        if let Some(v) = vertex {
+            return Some(Item::Vertex(v));
         }
         let mut best = (EDGE_HIT_SLOP, None);
-        for (i, e) in self.edges.iter().enumerate() {
+        for (i, e) in self.vis.edges.iter().enumerate() {
             let d = if e.source == e.target {
-                let c = self.to_screen(self.bodies[e.source].pos);
-                let s = (self.bodies[e.source].radius * self.zoom).max(6.);
-                let loop_center = point(c.x + px(s * 1.3), c.y - px(s * 1.3));
-                let r = (p - loop_center).x.as_f32().hypot((p - loop_center).y.as_f32());
+                let c = self.to_screen(self.vis.bodies[e.source].pos);
+                let s = (self.vis.bodies[e.source].radius * self.zoom).max(6.);
+                let center = point(c.x + px(s * 1.3), c.y - px(s * 1.3));
+                let r = (p.x - center.x).as_f32().hypot((p.y - center.y).as_f32());
                 (r - s * 0.9).abs()
             } else {
-                self.edge_geometry(e).distance_to(p)
+                self.edge_geometry(i).distance_to(p)
             };
             if d < best.0 {
                 best = (d, Some(i));
@@ -676,20 +966,30 @@ impl NetworkGraph {
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, cx: &mut Context<Self>) {
         let hit = self.hit_test(ev.position);
         if ev.button == MouseButton::Right {
-            if hit.is_some() {
-                self.set_selected(hit, cx);
+            if let Some(item) = hit {
+                self.set_selected(Some(self.key_of(item)), cx);
             }
-            cx.emit(GraphEvent::ContextMenu { target: self.item_selection(hit), position: ev.position });
+            let target = hit.map_or(Selection::None, |item| self.item_selection(item));
+            cx.emit(GraphEvent::ContextMenu { target, position: ev.position });
             return;
         }
         if ev.click_count >= 2 {
-            if let Some(Item::Node(i)) = hit {
-                cx.emit(GraphEvent::NodeActivated(self.nodes[i].clone()));
+            match hit {
+                Some(Item::Vertex(v)) => match self.vis.vertices[v] {
+                    Vertex::Node(i) => cx.emit(GraphEvent::NodeActivated(self.nodes[i].clone())),
+                    Vertex::Group(g) => {
+                        let id = self.groups[g].id.clone();
+                        self.expand_group(&id, cx);
+                    }
+                },
+                _ => {}
             }
             return;
         }
         let kind = match hit {
-            Some(Item::Node(index)) => DragKind::Node { index, was_pinned: self.bodies[index].fixed.is_some() },
+            Some(Item::Vertex(index)) => {
+                DragKind::Vertex { index, was_pinned: self.vis.bodies[index].fixed.is_some() }
+            }
             _ => DragKind::Pan { start_pan: self.pan },
         };
         self.drag = Some(Drag { kind, start: ev.position, moved: false });
@@ -710,10 +1010,10 @@ impl NetworkGraph {
                     self.auto_fit = false;
                     self.pan = start_pan + delta;
                 }
-                DragKind::Node { index, .. } => {
+                DragKind::Vertex { index, .. } => {
                     let w = self.to_world(ev.position);
-                    self.bodies[index].fixed = Some(w);
-                    self.bodies[index].pos = w;
+                    self.vis.bodies[index].fixed = Some(w);
+                    self.vis.bodies[index].pos = w;
                     self.sim.alpha_target = 0.3;
                     self.sim.reheat(0.3);
                     self.auto_fit = false;
@@ -733,18 +1033,19 @@ impl NetworkGraph {
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, cx: &mut Context<Self>) {
         let Some(drag) = self.drag.take() else { return };
         match drag.kind {
-            DragKind::Node { index, was_pinned } => {
+            DragKind::Vertex { index, was_pinned } => {
                 self.sim.alpha_target = 0.;
                 if !drag.moved {
-                    self.set_selected(Some(Item::Node(index)), cx);
+                    let key = self.key_of(Item::Vertex(index));
+                    self.set_selected(Some(key), cx);
                 } else if !(self.pin_on_drag || was_pinned) {
-                    self.bodies[index].fixed = None;
+                    self.vis.bodies[index].fixed = None;
                 }
             }
             DragKind::Pan { .. } => {
                 if !drag.moved {
-                    let hit = self.hit_test(ev.position);
-                    self.set_selected(hit, cx);
+                    let key = self.hit_test(ev.position).map(|item| self.key_of(item));
+                    self.set_selected(key, cx);
                 }
             }
         }
@@ -758,259 +1059,16 @@ impl NetworkGraph {
         self.zoom_around(ev.position, factor);
         cx.notify();
     }
-
-    // ---- painting -----------------------------------------------------------
-
-    fn node_color(&self, i: usize) -> Hsla {
-        self.color_of(&self.nodes[i])
-    }
-
-    fn paint_graph(&self, bounds: Bounds<Pixels>, colors: &GraphColors, window: &mut Window, cx: &mut App) {
-        let zoom = self.zoom;
-        let focus = self.hovered.or(self.selected);
-        let in_focus = |i: usize| match focus {
-            None => true,
-            Some(Item::Node(f)) => i == f || self.neighbors[f].binary_search(&i).is_ok(),
-            Some(Item::Edge(e)) => i == self.edges[e].source || i == self.edges[e].target,
-        };
-        let visible = bounds.dilate(px(40.));
-
-        // Edges are batched into one path per state to keep draw calls low.
-        #[derive(Clone, Copy, PartialEq)]
-        enum State {
-            Normal,
-            Dimmed,
-            Active,
-            Selected,
-        }
-        let stroke = (1.2 * zoom.sqrt()).clamp(0.6, 2.);
-        let mut lines: Vec<(PathBuilder, PathBuilder, bool)> = [1., 1., 1.6, 2.2]
-            .iter()
-            .map(|w| (PathBuilder::stroke(px(stroke * w)), PathBuilder::fill(), false))
-            .collect();
-        let mut edge_labels = Vec::new();
-
-        for (ei, e) in self.edges.iter().enumerate() {
-            let geom = self.edge_geometry(e);
-            let (a, b) = (geom.eval(0.), geom.eval(1.));
-            if !segment_may_intersect(visible, a, b) {
-                continue;
-            }
-            let state = if self.selected == Some(Item::Edge(ei)) {
-                State::Selected
-            } else {
-                match focus {
-                    None => State::Normal,
-                    Some(Item::Node(f)) if e.source == f || e.target == f => State::Active,
-                    Some(Item::Edge(x)) if x == ei => State::Active,
-                    Some(_) => State::Dimmed,
-                }
-            };
-            let (path, arrows, used) = &mut lines[state as usize];
-            *used = true;
-            let rs = self.bodies[e.source].radius * zoom;
-            let rt = self.bodies[e.target].radius * zoom;
-            if e.source == e.target {
-                draw_self_loop(path, a, rs);
-                continue;
-            }
-            let arrow = 6. + stroke * 2.;
-            let gap = if self.show_arrows { rt + arrow } else { rt };
-            path.move_to(geom.point_from_start(rs));
-            let end = geom.point_from_end(gap);
-            match geom.ctrl {
-                Some(ctrl) => path.curve_to(end, ctrl),
-                None => path.line_to(end),
-            }
-            if self.show_arrows && zoom > 0.25 {
-                let tip = geom.point_from_end(rt);
-                let (dx, dy) = geom.end_direction();
-                let (nx, ny) = (-dy * arrow * 0.45, dx * arrow * 0.45);
-                let (bx, by) = (tip.x.as_f32() - dx * arrow, tip.y.as_f32() - dy * arrow);
-                arrows.add_polygon(
-                    &[tip, point(px(bx + nx), px(by + ny)), point(px(bx - nx), px(by - ny))],
-                    true,
-                );
-            }
-            let emphasized = matches!(state, State::Active | State::Selected);
-            let label_visible = self.show_edge_labels
-                && !e.data.label.is_empty()
-                && (emphasized || (state == State::Normal && zoom >= 1.1));
-            if label_visible {
-                edge_labels.push((geom.midpoint(), e.data.label.clone(), emphasized));
-            }
-        }
-
-        let edge_colors = [colors.edge, colors.edge.opacity(0.15), colors.edge_active, colors.selection];
-        // Dimmed first so emphasized edges land on top.
-        for state in [State::Dimmed, State::Normal, State::Active, State::Selected] {
-            let (path, arrows, used) = std::mem::replace(
-                &mut lines[state as usize],
-                (PathBuilder::fill(), PathBuilder::fill(), false),
-            );
-            if !used {
-                continue;
-            }
-            let color = edge_colors[state as usize];
-            if let Ok(path) = path.build() {
-                window.paint_path(path, color);
-            }
-            if let Ok(arrows) = arrows.build() {
-                window.paint_path(arrows, color);
-            }
-        }
-
-        let label_size = px(11.);
-        for (pos, text, active) in edge_labels {
-            let color = if active { colors.foreground } else { colors.muted };
-            let line = shape(&text, label_size, color, window);
-            let w = line.width;
-            let chip = Bounds::new(point(pos.x - w / 2. - px(3.), pos.y - px(8.)), size(w + px(6.), px(16.)));
-            window.paint_quad(gpui::fill(chip, colors.background.opacity(0.85)).corner_radii(px(3.)));
-            let _ = line.paint(point(pos.x - w / 2., pos.y - px(7.)), px(14.), TextAlign::Left, None, window, cx);
-        }
-
-        // Nodes, then labels above every node.
-        let mut labels = Vec::new();
-        for (i, b) in self.bodies.iter().enumerate() {
-            let c = self.to_screen(b.pos);
-            let r = b.radius * zoom;
-            if !visible.contains(&c) && r < 200. {
-                continue;
-            }
-            let base = self.node_color(i);
-            let faded = !in_focus(i);
-            let is_selected = self.selected == Some(Item::Node(i));
-            let is_hovered = self.hovered == Some(Item::Node(i));
-            let ring = if is_selected { (r * 0.18).clamp(2., 4.) } else { (r * 0.12).clamp(1., 2.) };
-            let border = if is_selected {
-                colors.selection
-            } else if faded {
-                colors.background.opacity(0.4)
-            } else {
-                colors.background
-            };
-            let rr = r + if is_hovered { 2. } else { 0. };
-            if is_selected || is_hovered {
-                let halo = rr + 6.;
-                window.paint_quad(gpui::fill(circle(c, halo), base.opacity(0.25)).corner_radii(px(halo)));
-            }
-            let fill = if faded { base.opacity(0.2) } else { base };
-            window.paint_quad(quad(circle(c, rr), px(rr), fill, px(ring), border, BorderStyle::Solid));
-            if b.fixed.is_some() && rr > 6. {
-                // Small pin marker for nodes that will not move with the layout.
-                let pin = (rr * 0.22).clamp(2., 4.);
-                window.paint_quad(gpui::fill(circle(c, pin), colors.background.opacity(0.9)).corner_radii(px(pin)));
-            }
-
-            let show_label = match self.label_mode {
-                LabelMode::Always => true,
-                LabelMode::Auto => (focus.is_none() && zoom >= 0.7) || (focus.is_some() && !faded),
-                LabelMode::Focus => focus.is_some() && !faded,
-                LabelMode::Never => false,
-            };
-            if show_label && !self.nodes[i].label.is_empty() {
-                labels.push((c, rr, i, faded, is_selected || is_hovered));
-            }
-        }
-
-        let font_size = px((12. * zoom.sqrt()).clamp(10., 14.));
-        for (c, r, i, faded, strong) in labels {
-            let text = truncate(&self.nodes[i].label, 24);
-            let color = if faded {
-                colors.muted.opacity(0.4)
-            } else if strong {
-                colors.foreground
-            } else {
-                colors.muted
-            };
-            let line = shape(&text, font_size, color, window);
-            let origin = point(c.x - line.width / 2., c.y + px(r) + px(3.));
-            if strong {
-                let chip = Bounds::new(origin - point(px(4.), px(1.)), size(line.width + px(8.), font_size + px(4.)));
-                window.paint_quad(gpui::fill(chip, colors.background.opacity(0.9)).corner_radii(px(3.)));
-            }
-            let _ = line.paint(origin, font_size + px(2.), TextAlign::Left, None, window, cx);
-        }
-    }
-
-    fn tooltip(&self, colors: &GraphColors, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
-        if !self.show_tooltip || self.drag.as_ref().is_some_and(|d| d.moved) {
-            return None;
-        }
-        let item = self.hovered?;
-        let pointer = self.pointer?;
-        let selection = self.item_selection(Some(item));
-        let content = match &self.tooltip {
-            Some(builder) => builder(&selection, colors, window, cx)?,
-            None => self.default_tooltip(item, colors).into_any_element(),
-        };
-        let origin = self.bounds.get().origin;
-        Some(
-            div()
-                .absolute()
-                .left(pointer.x - origin.x + px(14.))
-                .top(pointer.y - origin.y + px(14.))
-                .child(content)
-                .into_any_element(),
-        )
-    }
-
-    fn default_tooltip(&self, item: Item, colors: &GraphColors) -> impl IntoElement {
-        let (swatch, kicker, title, detail) = match item {
-            Item::Node(i) => {
-                let node = &self.nodes[i];
-                (
-                    Some(self.node_color(i)),
-                    node.category.clone(),
-                    node.label.clone(),
-                    format!("{} relationships", self.degrees[i]),
-                )
-            }
-            Item::Edge(e) => {
-                let e = &self.edges[e];
-                (
-                    None,
-                    "Relationship".into(),
-                    e.data.label.clone(),
-                    format!("{} → {}", self.nodes[e.source].label, self.nodes[e.target].label),
-                )
-            }
-        };
-        div()
-            .max_w(px(280.))
-            .px_2()
-            .py_1p5()
-            .rounded_md()
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
-            .shadow_md()
-            .text_xs()
-            .text_color(colors.foreground)
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .children(swatch.map(|c| div().size_2().rounded_full().bg(c)))
-                    .child(div().text_color(colors.muted).child(kicker)),
-            )
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
-            .child(div().text_color(colors.muted).child(detail))
-    }
 }
 
 impl Render for NetworkGraph {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.sim.is_active() && !self.bodies.is_empty() {
+        if self.sim.is_active() && !self.vis.bodies.is_empty() {
             // Small graphs can afford two ticks per frame and settle twice as fast.
-            let ticks = if self.bodies.len() > 1500 { 1 } else { 2 };
+            let ticks = if self.vis.bodies.len() > 1500 { 1 } else { 2 };
+            let vis = &mut self.vis;
             for _ in 0..ticks {
-                self.sim.tick(&mut self.bodies, &self.links, &self.degrees);
+                self.sim.tick(&mut vis.bodies, &vis.links, &vis.degrees, &vis.clusters);
             }
             if self.auto_fit {
                 self.apply_fit(0.25);
@@ -1019,7 +1077,7 @@ impl Render for NetworkGraph {
         }
 
         let colors = self.colors.clone().unwrap_or_else(|| GraphColors::from_theme(cx));
-        let tooltip = self.tooltip(&colors, window, cx);
+        let tooltip = self.tooltip_element(&colors, window, cx);
         let entity = cx.entity();
         let bounds_cell = self.bounds.clone();
         let background = colors.background;
@@ -1089,28 +1147,4 @@ fn register_input(entity: &Entity<NetworkGraph>, hitbox: &Hitbox, window: &mut W
             e.update(cx, |this, cx| this.on_scroll(ev, cx));
         }
     });
-}
-
-fn circle(c: Point<Pixels>, r: f32) -> Bounds<Pixels> {
-    Bounds::new(point(c.x - px(r), c.y - px(r)), size(px(r * 2.), px(r * 2.)))
-}
-
-fn shape(text: &SharedString, font_size: Pixels, color: Hsla, window: &mut Window) -> ShapedLine {
-    let run = TextRun {
-        len: text.len(),
-        font: window.text_style().font(),
-        color,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    window.text_system().shape_line(text.clone(), font_size, &[run], None)
-}
-
-fn truncate(s: &SharedString, max: usize) -> SharedString {
-    if s.chars().count() <= max {
-        return s.clone();
-    }
-    let t: String = s.chars().take(max - 1).collect();
-    format!("{t}…").into()
 }

@@ -17,6 +17,9 @@ pub struct ForceConfig {
     pub collide_strength: f32,
     /// `forceX/forceY` pull toward the origin; holds disconnected components together.
     pub gravity: f32,
+    /// Pull of each group (community) member toward its group's centroid, so
+    /// communities form visible clusters. 0 disables.
+    pub group_strength: f32,
     pub velocity_decay: f32,
     pub alpha_min: f32,
     pub alpha_decay: f32,
@@ -33,6 +36,7 @@ impl Default for ForceConfig {
             collide_padding: 4.,
             collide_strength: 0.7,
             gravity: 0.04,
+            group_strength: 0.12,
             velocity_decay: 0.4,
             alpha_min,
             alpha_decay: 1. - alpha_min.powf(1. / 300.),
@@ -101,7 +105,14 @@ impl Simulation {
         }
     }
 
-    pub fn tick(&mut self, bodies: &mut [Body], links: &[(usize, usize)], degrees: &[usize]) {
+    /// Advance one step. `groups` lists body indices per cluster for the group force.
+    pub fn tick(
+        &mut self,
+        bodies: &mut [Body],
+        links: &[(usize, usize)],
+        degrees: &[usize],
+        groups: &[Vec<usize>],
+    ) {
         if bodies.is_empty() {
             return;
         }
@@ -111,6 +122,7 @@ impl Simulation {
         self.apply_links(bodies, links, degrees, alpha);
         self.apply_many_body(bodies, alpha);
         self.apply_collide(bodies);
+        self.apply_groups(bodies, groups, alpha);
         let gravity = self.config.gravity * alpha;
         for b in bodies.iter_mut() {
             b.vel.x -= b.pos.x * gravity;
@@ -164,6 +176,22 @@ impl Simulation {
             bodies[t].vel.y -= y * bias;
             bodies[s].vel.x += x * (1. - bias);
             bodies[s].vel.y += y * (1. - bias);
+        }
+    }
+
+    fn apply_groups(&self, bodies: &mut [Body], groups: &[Vec<usize>], alpha: f32) {
+        let k = self.config.group_strength * alpha;
+        if k == 0. {
+            return;
+        }
+        for members in groups.iter().filter(|m| m.len() > 1) {
+            let n = members.len() as f32;
+            let (cx, cy) = members.iter().fold((0., 0.), |(x, y), &i| (x + bodies[i].pos.x, y + bodies[i].pos.y));
+            let (cx, cy) = (cx / n, cy / n);
+            for &i in members {
+                bodies[i].vel.x += (cx - bodies[i].pos.x) * k;
+                bodies[i].vel.y += (cy - bodies[i].pos.y) * k;
+            }
         }
     }
 
@@ -462,7 +490,7 @@ mod tests {
         let mut sim = Simulation::new(ForceConfig::default());
         let degrees = vec![0; 50];
         for _ in 0..20 {
-            sim.tick(&mut b, &[], &degrees);
+            sim.tick(&mut b, &[], &degrees, &[]);
         }
         assert!(b.iter().all(|b| b.pos.x.is_finite() && b.pos.y.is_finite()));
     }
@@ -480,7 +508,7 @@ mod tests {
         let mut sim = Simulation::new(ForceConfig::default());
         let mut ticks = 0;
         while sim.is_active() {
-            sim.tick(&mut b, &links, &degrees);
+            sim.tick(&mut b, &links, &degrees, &[]);
             ticks += 1;
         }
         assert!(ticks < 400);
