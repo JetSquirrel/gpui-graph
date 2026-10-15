@@ -102,14 +102,21 @@ pub(crate) fn convex_hull(mut pts: Vec<(f32, f32)>) -> Vec<(f32, f32)> {
     if pts.len() < 3 {
         return pts;
     }
-    let cross = |o: (f32, f32), a: (f32, f32), b: (f32, f32)| (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0);
+    let cross = |o: (f32, f32), a: (f32, f32), b: (f32, f32)| {
+        (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
+    };
     let mut hull: Vec<(f32, f32)> = Vec::with_capacity(pts.len() * 2);
     for pass in 0..2 {
         let start = hull.len();
-        let iter: Box<dyn Iterator<Item = &(f32, f32)>> =
-            if pass == 0 { Box::new(pts.iter()) } else { Box::new(pts.iter().rev()) };
+        let iter: Box<dyn Iterator<Item = &(f32, f32)>> = if pass == 0 {
+            Box::new(pts.iter())
+        } else {
+            Box::new(pts.iter().rev())
+        };
         for &p in iter {
-            while hull.len() >= start + 2 && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0. {
+            while hull.len() >= start + 2
+                && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.
+            {
                 hull.pop();
             }
             hull.push(p);
@@ -157,7 +164,11 @@ fn point_segment_distance(p: Point<Pixels>, a: Point<Pixels>, b: Point<Pixels>) 
     let (abx, aby) = ((b.x - a.x).as_f32(), (b.y - a.y).as_f32());
     let (apx, apy) = ((p.x - a.x).as_f32(), (p.y - a.y).as_f32());
     let len2 = abx * abx + aby * aby;
-    let t = if len2 > 0. { ((apx * abx + apy * aby) / len2).clamp(0., 1.) } else { 0. };
+    let t = if len2 > 0. {
+        ((apx * abx + apy * aby) / len2).clamp(0., 1.)
+    } else {
+        0.
+    };
     (apx - abx * t).hypot(apy - aby * t)
 }
 
@@ -167,7 +178,14 @@ mod tests {
 
     #[test]
     fn hull_drops_interior_points() {
-        let pts = vec![(0., 0.), (10., 0.), (10., 10.), (0., 10.), (5., 5.), (2., 7.)];
+        let pts = vec![
+            (0., 0.),
+            (10., 0.),
+            (10., 10.),
+            (0., 10.),
+            (5., 5.),
+            (2., 7.),
+        ];
         let hull = convex_hull(pts);
         assert_eq!(hull.len(), 4);
         assert!(!hull.contains(&(5., 5.)));

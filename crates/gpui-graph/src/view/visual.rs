@@ -90,9 +90,15 @@ impl Visual {
         let mut merged: HashMap<(usize, usize), usize> = HashMap::new();
         for (ei, &(s, t)) in edges.iter().enumerate() {
             let (vs, vt) = (v.node_slot[s], v.node_slot[t]);
-            let touches_group = matches!(v.vertices[vs], Vertex::Group(_)) || matches!(v.vertices[vt], Vertex::Group(_));
+            let touches_group = matches!(v.vertices[vs], Vertex::Group(_))
+                || matches!(v.vertices[vt], Vertex::Group(_));
             if !touches_group {
-                v.edges.push(VisualEdge { source: vs, target: vt, edges: vec![ei], curvature: 0. });
+                v.edges.push(VisualEdge {
+                    source: vs,
+                    target: vt,
+                    edges: vec![ei],
+                    curvature: 0.,
+                });
                 continue;
             }
             if vs == vt {
@@ -102,7 +108,12 @@ impl Visual {
                 Some(&k) => v.edges[k].edges.push(ei),
                 None => {
                     merged.insert((vs, vt), v.edges.len());
-                    v.edges.push(VisualEdge { source: vs, target: vt, edges: vec![ei], curvature: 0. });
+                    v.edges.push(VisualEdge {
+                        source: vs,
+                        target: vt,
+                        edges: vec![ei],
+                        curvature: 0.,
+                    });
                 }
             }
         }
@@ -127,13 +138,20 @@ impl Visual {
         // Fan out parallel edges so multi-relationships stay distinguishable.
         let mut pairs: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
         for (i, e) in v.edges.iter().enumerate() {
-            pairs.entry((e.source.min(e.target), e.source.max(e.target))).or_default().push(i);
+            pairs
+                .entry((e.source.min(e.target), e.source.max(e.target)))
+                .or_default()
+                .push(i);
         }
         for list in pairs.values() {
             let count = list.len() as f32;
             for (k, &i) in list.iter().enumerate() {
                 let e = &mut v.edges[i];
-                let mut c = if count > 1. { k as f32 - (count - 1.) / 2. } else { 0. };
+                let mut c = if count > 1. {
+                    k as f32 - (count - 1.) / 2.
+                } else {
+                    0.
+                };
                 // Normalise direction so A->B and B->A bend to opposite sides.
                 if e.source > e.target {
                     c = -c;

@@ -191,7 +191,13 @@ impl Simulation {
         (self.rng as f32 / u32::MAX as f32 - 0.5) * 1e-6
     }
 
-    fn apply_links(&mut self, bodies: &mut [Body], links: &[(usize, usize)], degrees: &[usize], alpha: f32) {
+    fn apply_links(
+        &mut self,
+        bodies: &mut [Body],
+        links: &[(usize, usize)],
+        degrees: &[usize],
+        alpha: f32,
+    ) {
         for &(s, t) in links {
             if s == t {
                 continue;
@@ -226,7 +232,9 @@ impl Simulation {
         }
         for members in groups.iter().filter(|m| m.len() > 1) {
             let n = members.len() as f32;
-            let (cx, cy) = members.iter().fold((0., 0.), |(x, y), &i| (x + bodies[i].pos.x, y + bodies[i].pos.y));
+            let (cx, cy) = members.iter().fold((0., 0.), |(x, y), &i| {
+                (x + bodies[i].pos.x, y + bodies[i].pos.y)
+            });
             let (cx, cy) = (cx / n, cy / n);
             for &i in members {
                 bodies[i].vel.x += (cx - bodies[i].pos.x) * k;
@@ -240,10 +248,10 @@ impl Simulation {
         let theta2 = self.config.theta * self.config.theta;
         let max2 = self.config.charge_distance_max * self.config.charge_distance_max;
         let strength = self.config.charge;
-        for i in 0..bodies.len() {
+        for (i, body) in bodies.iter_mut().enumerate() {
             let (fx, fy) = self.quadtree.force(i, strength * alpha, theta2, max2);
-            bodies[i].vel.x += fx;
-            bodies[i].vel.y += fy;
+            body.vel.x += fx;
+            body.vel.y += fy;
         }
     }
 
@@ -254,7 +262,10 @@ impl Simulation {
         let cell = (max_r * 2.).max(1.);
         let mut grid: std::collections::HashMap<(i32, i32), Vec<usize>> = Default::default();
         for (i, b) in bodies.iter().enumerate() {
-            let key = ((b.pos.x / cell).floor() as i32, (b.pos.y / cell).floor() as i32);
+            let key = (
+                (b.pos.x / cell).floor() as i32,
+                (b.pos.y / cell).floor() as i32,
+            );
             grid.entry(key).or_default().push(i);
         }
         let strength = self.config.collide_strength;
@@ -265,7 +276,9 @@ impl Simulation {
             );
             for gx in cx - 1..=cx + 1 {
                 for gy in cy - 1..=cy + 1 {
-                    let Some(cell_items) = grid.get(&(gx, gy)) else { continue };
+                    let Some(cell_items) = grid.get(&(gx, gy)) else {
+                        continue;
+                    };
                     for &j in cell_items {
                         if j <= i {
                             continue;
@@ -322,7 +335,16 @@ struct Cell {
 
 impl Cell {
     fn new(x0: f32, y0: f32, size: f32) -> Self {
-        Self { x0, y0, size, count: 0., cx: 0., cy: 0., body: EMPTY, children: EMPTY }
+        Self {
+            x0,
+            y0,
+            size,
+            count: 0.,
+            cx: 0.,
+            cy: 0.,
+            body: EMPTY,
+            children: EMPTY,
+        }
     }
 
     fn is_leaf(&self) -> bool {
@@ -493,7 +515,13 @@ mod tests {
     use super::*;
 
     fn bodies(n: usize) -> Vec<Body> {
-        let mut b = vec![Body { radius: 8., ..Default::default() }; n];
+        let mut b = vec![
+            Body {
+                radius: 8.,
+                ..Default::default()
+            };
+            n
+        ];
         Simulation::initialize_positions(&mut b, 0);
         b
     }
@@ -526,7 +554,13 @@ mod tests {
 
     #[test]
     fn coincident_points_do_not_overflow() {
-        let mut b = vec![Body { radius: 5., ..Default::default() }; 50];
+        let mut b = vec![
+            Body {
+                radius: 5.,
+                ..Default::default()
+            };
+            50
+        ];
         let mut sim = Simulation::new(ForceConfig::default());
         let degrees = vec![0; 50];
         for _ in 0..20 {

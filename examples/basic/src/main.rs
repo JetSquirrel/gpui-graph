@@ -41,7 +41,11 @@ impl Example {
                 cx.notify();
             }
         });
-        Self { graph, selected: "nothing".into(), _subscription: subscription }
+        Self {
+            graph,
+            selected: "nothing".into(),
+            _subscription: subscription,
+        }
     }
 }
 
@@ -51,7 +55,12 @@ impl Render for Example {
             .size_full()
             .flex()
             .flex_col()
-            .child(div().p_2().text_sm().child(format!("Selected: {}", self.selected)))
+            .child(
+                div()
+                    .p_2()
+                    .text_sm()
+                    .child(format!("Selected: {}", self.selected)),
+            )
             .child(div().flex_1().child(self.graph.clone()))
     }
 }
@@ -64,7 +73,8 @@ fn main() {
             window_bounds: Some(WindowBounds::centered(size(px(800.), px(600.)), cx)),
             ..Default::default()
         };
-        cx.open_window(options, |_, cx| cx.new(Example::new)).unwrap();
+        cx.open_window(options, |_, cx| cx.new(Example::new))
+            .unwrap();
         cx.activate(true);
     });
 }

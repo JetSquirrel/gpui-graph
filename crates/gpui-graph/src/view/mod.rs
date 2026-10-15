@@ -55,9 +55,15 @@ pub enum NetworkGraphEvent {
     /// Double-click on a node: the usual "expand neighbors" gesture in graph explorers.
     NodeActivated(Node),
     /// A group was collapsed or expanded, by the user or through the API.
-    GroupToggled { group: SharedString, collapsed: bool },
+    GroupToggled {
+        group: SharedString,
+        collapsed: bool,
+    },
     /// Right-click. `position` is in window coordinates, ready for a popover anchor.
-    ContextMenu { target: Selection, position: Point<Pixels> },
+    ContextMenu {
+        target: Selection,
+        position: Point<Pixels>,
+    },
 }
 
 /// A category present in the graph, for legends.
@@ -299,7 +305,8 @@ impl NetworkGraph {
     /// Replace the built-in tooltip. Return `None` from the builder to hide it.
     pub fn with_tooltip(
         mut self,
-        builder: impl Fn(&Selection, &GraphColors, &mut Window, &mut App) -> Option<AnyElement> + 'static,
+        builder: impl Fn(&Selection, &GraphColors, &mut Window, &mut App) -> Option<AnyElement>
+        + 'static,
     ) -> Self {
         self.tooltip = Some(Rc::new(builder));
         self
@@ -409,7 +416,11 @@ impl NetworkGraph {
 
     /// Remove nodes and every edge touching them.
     pub fn remove_nodes(&mut self, ids: &[&str], cx: &mut Context<Self>) {
-        let doomed: Vec<bool> = self.nodes.iter().map(|n| ids.contains(&n.id.as_ref())).collect();
+        let doomed: Vec<bool> = self
+            .nodes
+            .iter()
+            .map(|n| ids.contains(&n.id.as_ref()))
+            .collect();
         if !doomed.contains(&true) {
             return;
         }
@@ -432,8 +443,14 @@ impl NetworkGraph {
             e.target = remap[e.target];
             keep
         });
-        self.index = self.nodes.iter().enumerate().map(|(i, n)| (n.id.clone(), i)).collect();
-        self.categories.retain(|c| self.nodes.iter().any(|n| &n.category == c));
+        self.index = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.id.clone(), i))
+            .collect();
+        self.categories
+            .retain(|c| self.nodes.iter().any(|n| &n.category == c));
         // Model edge indices shifted; an edge selection cannot be carried over.
         if matches!(self.selected, Some(SelectionKey::Edges(_))) {
             self.selected = None;
@@ -503,12 +520,20 @@ impl NetworkGraph {
         }
 
         for edge in data.edges {
-            let (Some(&s), Some(&t)) = (self.index.get(&edge.source), self.index.get(&edge.target)) else {
+            let (Some(&s), Some(&t)) = (self.index.get(&edge.source), self.index.get(&edge.target))
+            else {
                 continue;
             };
-            let duplicate = self.edges.iter().any(|e| e.source == s && e.target == t && e.data.label == edge.label);
+            let duplicate = self
+                .edges
+                .iter()
+                .any(|e| e.source == s && e.target == t && e.data.label == edge.label);
             if !duplicate {
-                self.edges.push(ModelEdge { data: edge, source: s, target: t });
+                self.edges.push(ModelEdge {
+                    data: edge,
+                    source: s,
+                    target: t,
+                });
             }
         }
         self.rebuild();
@@ -544,7 +569,9 @@ impl NetworkGraph {
             list.dedup();
         }
         for (i, body) in self.node_bodies.iter_mut().enumerate() {
-            body.radius = self.nodes[i].size.unwrap_or_else(|| self.sizing.radius(self.degrees[i]));
+            body.radius = self.nodes[i]
+                .size
+                .unwrap_or_else(|| self.sizing.radius(self.degrees[i]));
         }
 
         // Groups keep their state (collapsed, position, label) across rebuilds.
@@ -570,7 +597,12 @@ impl NetworkGraph {
         }
         if self.groups.iter().any(|g| g.members.is_empty()) {
             self.groups.retain(|g| !g.members.is_empty());
-            self.group_index = self.groups.iter().enumerate().map(|(g, s)| (s.id.clone(), g)).collect();
+            self.group_index = self
+                .groups
+                .iter()
+                .enumerate()
+                .map(|(g, s)| (s.id.clone(), g))
+                .collect();
             for (i, node) in self.nodes.iter().enumerate() {
                 self.node_group[i] = node.group.as_ref().map(|id| self.group_index[id]);
             }
@@ -582,7 +614,10 @@ impl NetworkGraph {
         let groups: Vec<GroupInput> = self
             .groups
             .iter()
-            .map(|g| GroupInput { collapsed: g.collapsed, body: &g.body })
+            .map(|g| GroupInput {
+                collapsed: g.collapsed,
+                body: &g.body,
+            })
             .collect();
         let links: Vec<(usize, usize)> = self.edges.iter().map(|e| (e.source, e.target)).collect();
         self.vis = Visual::build(&self.node_bodies, &self.node_group, &groups, &links);
@@ -611,13 +646,20 @@ impl NetworkGraph {
     pub fn neighbors_of(&self, id: &str) -> Vec<Node> {
         self.index
             .get(id)
-            .map(|&i| self.neighbors[i].iter().map(|&j| self.nodes[j].clone()).collect())
+            .map(|&i| {
+                self.neighbors[i]
+                    .iter()
+                    .map(|&j| self.nodes[j].clone())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
     /// Edges touching a node, in either direction.
     pub fn edges_of(&self, id: &str) -> Vec<Edge> {
-        let Some(&i) = self.index.get(id) else { return Vec::new() };
+        let Some(&i) = self.index.get(id) else {
+            return Vec::new();
+        };
         self.edges
             .iter()
             .filter(|e| e.source == i || e.target == i)
@@ -649,13 +691,21 @@ impl NetworkGraph {
     pub fn group_members(&self, id: &str) -> Vec<Node> {
         self.group_index
             .get(id)
-            .map(|&g| self.groups[g].members.iter().map(|&i| self.nodes[i].clone()).collect())
+            .map(|&g| {
+                self.groups[g]
+                    .members
+                    .iter()
+                    .map(|&i| self.nodes[i].clone())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
     /// The colors in effect: the override, or the current theme.
     pub fn resolved_colors(&self, cx: &App) -> GraphColors {
-        self.colors.clone().unwrap_or_else(|| GraphColors::from_theme(cx))
+        self.colors
+            .clone()
+            .unwrap_or_else(|| GraphColors::from_theme(cx))
     }
 
     /// The color a node is painted with.
@@ -665,7 +715,11 @@ impl NetworkGraph {
         }
         match self.color_by {
             ColorBy::Category => {
-                let ix = self.categories.iter().position(|c| c == &node.category).unwrap_or(0);
+                let ix = self
+                    .categories
+                    .iter()
+                    .position(|c| c == &node.category)
+                    .unwrap_or(0);
                 self.palette.get(ix)
             }
             ColorBy::Group => match node.group.as_ref().and_then(|g| self.group_index.get(g)) {
@@ -678,8 +732,13 @@ impl NetworkGraph {
     pub fn selection(&self) -> Selection {
         match &self.selected {
             None => Selection::None,
-            Some(SelectionKey::Node(id)) => self.node(id).cloned().map_or(Selection::None, Selection::Node),
-            Some(SelectionKey::Group(id)) => self.group(id).map_or(Selection::None, Selection::Group),
+            Some(SelectionKey::Node(id)) => self
+                .node(id)
+                .cloned()
+                .map_or(Selection::None, Selection::Node),
+            Some(SelectionKey::Group(id)) => {
+                self.group(id).map_or(Selection::None, Selection::Group)
+            }
             Some(SelectionKey::Edges(edges)) => self.edge_selection(edges),
         }
     }
@@ -712,7 +771,9 @@ impl NetworkGraph {
         match edges {
             [] => Selection::None,
             [e] => Selection::Edge(self.edges[*e].data.clone()),
-            many => Selection::EdgeBundle(many.iter().map(|&e| self.edges[e].data.clone()).collect()),
+            many => {
+                Selection::EdgeBundle(many.iter().map(|&e| self.edges[e].data.clone()).collect())
+            }
         }
     }
 
@@ -743,10 +804,15 @@ impl NetworkGraph {
                 let slot = self.vis.node_slot[*self.index.get(id)?];
                 matches!(self.vis.vertices[slot], Vertex::Node(_)).then_some(Item::Vertex(slot))
             }
-            SelectionKey::Group(id) => self.vis.group_slot[*self.group_index.get(id)?].map(Item::Vertex),
-            SelectionKey::Edges(edges) => {
-                self.vis.edges.iter().position(|e| &e.edges == edges).map(Item::Edge)
+            SelectionKey::Group(id) => {
+                self.vis.group_slot[*self.group_index.get(id)?].map(Item::Vertex)
             }
+            SelectionKey::Edges(edges) => self
+                .vis
+                .edges
+                .iter()
+                .position(|e| &e.edges == edges)
+                .map(Item::Edge),
         }
     }
 
@@ -762,14 +828,16 @@ impl NetworkGraph {
 
     /// Select a node by id (`None` clears), optionally centering it.
     pub fn select_node(&mut self, id: Option<&str>, center: bool, cx: &mut Context<Self>) {
-        let key = id.filter(|id| self.index.contains_key(*id)).map(|id| SelectionKey::Node(id.to_string().into()));
-        if let (Some(id), true) = (id, center) {
-            if let Some(&i) = self.index.get(id) {
-                let p = self.vis.bodies[self.vis.node_slot[i]].pos;
-                self.auto_fit = false;
-                self.pan = point(px(-p.x * self.zoom), px(-p.y * self.zoom));
-                cx.notify();
-            }
+        let key = id
+            .filter(|id| self.index.contains_key(*id))
+            .map(|id| SelectionKey::Node(id.to_string().into()));
+        if let (Some(id), true) = (id, center)
+            && let Some(&i) = self.index.get(id)
+        {
+            let p = self.vis.bodies[self.vis.node_slot[i]].pos;
+            self.auto_fit = false;
+            self.pan = point(px(-p.x * self.zoom), px(-p.y * self.zoom));
+            cx.notify();
         }
         self.set_selected(key, cx);
     }
@@ -843,7 +911,12 @@ impl NetworkGraph {
         self.set_groups_collapsed(|_| true, false, cx);
     }
 
-    pub fn set_group_label(&mut self, id: &str, label: impl Into<SharedString>, cx: &mut Context<Self>) {
+    pub fn set_group_label(
+        &mut self,
+        id: &str,
+        label: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(&g) = self.group_index.get(id) {
             self.groups[g].label = label.into();
             cx.notify();
@@ -878,7 +951,10 @@ impl NetworkGraph {
                 group.body.fixed = None;
             } else {
                 let group = &self.groups[g];
-                let (dx, dy) = (group.body.pos.x - group.anchor.x, group.body.pos.y - group.anchor.y);
+                let (dx, dy) = (
+                    group.body.pos.x - group.anchor.x,
+                    group.body.pos.y - group.anchor.y,
+                );
                 for i in members {
                     let b = &mut self.node_bodies[i];
                     b.pos = Vec2::new(b.pos.x + dx, b.pos.y + dy);
@@ -891,16 +967,19 @@ impl NetworkGraph {
             self.groups[g].collapsed = collapse;
         }
         // A selected super node no longer exists once expanded.
-        if let (false, Some(SelectionKey::Group(id))) = (collapse, &self.selected) {
-            if targets.iter().any(|&g| &self.groups[g].id == id) {
-                self.selected = None;
-                cx.emit(NetworkGraphEvent::SelectionChanged(Selection::None));
-            }
+        if let (false, Some(SelectionKey::Group(id))) = (collapse, &self.selected)
+            && targets.iter().any(|&g| &self.groups[g].id == id)
+        {
+            self.selected = None;
+            cx.emit(NetworkGraphEvent::SelectionChanged(Selection::None));
         }
         self.rebuild();
         self.sim.reheat(0.4);
         for g in targets {
-            cx.emit(NetworkGraphEvent::GroupToggled { group: self.groups[g].id.clone(), collapsed: collapse });
+            cx.emit(NetworkGraphEvent::GroupToggled {
+                group: self.groups[g].id.clone(),
+                collapsed: collapse,
+            });
         }
         cx.notify();
     }
@@ -947,7 +1026,9 @@ impl NetworkGraph {
         let padding = 48.;
         let w = (bounds.size.width.as_f32() - padding * 2.).max(1.);
         let h = (bounds.size.height.as_f32() - padding * 2.).max(1.);
-        let zoom = (w / (x1 - x0).max(1.)).min(h / (y1 - y0).max(1.)).clamp(MIN_ZOOM, 2.);
+        let zoom = (w / (x1 - x0).max(1.))
+            .min(h / (y1 - y0).max(1.))
+            .clamp(MIN_ZOOM, 2.);
         let (cx, cy) = ((x0 + x1) / 2., (y0 + y1) / 2.);
         let target = point(px(-cx * zoom), px(-cy * zoom));
         self.zoom += (zoom - self.zoom) * blend;
@@ -1046,14 +1127,22 @@ impl NetworkGraph {
         }
     }
 
-    fn on_open_context_menu(&mut self, _: &OpenContextMenu, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_open_context_menu(
+        &mut self,
+        _: &OpenContextMenu,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.keyboard_nav = true;
         let position = match self.selected_item() {
             Some(Item::Vertex(v)) => self.to_screen(self.vis.bodies[v].pos),
             Some(Item::Edge(e)) => self.edge_geometry(e).midpoint(),
             None => self.bounds.get().center(),
         };
-        cx.emit(NetworkGraphEvent::ContextMenu { target: self.selection(), position });
+        cx.emit(NetworkGraphEvent::ContextMenu {
+            target: self.selection(),
+            position,
+        });
     }
 
     /// Move the selection to the nearest vertex in a direction (spatial navigation).
@@ -1086,7 +1175,7 @@ impl NetworkGraph {
                         let dist = x.hypot(y).max(1e-3);
                         let cos = (x * dx + y * dy) / dist;
                         // Within ±60° of the direction; prefer straight ahead.
-                        (cos > 0.5).then(|| (i, dist * (2. - cos)))
+                        (cos > 0.5).then_some((i, dist * (2. - cos)))
                     })
                     .min_by(|a, b| a.1.total_cmp(&b.1))
                     .map(|(i, _)| i)
@@ -1104,11 +1193,17 @@ impl NetworkGraph {
         let bounds = self.bounds.get();
         let margin = px(48.);
         let p = self.to_screen(self.vis.bodies[v].pos);
-        let inner = Bounds::from_corners(bounds.origin + point(margin, margin), bounds.bottom_right() - point(margin, margin));
+        let inner = Bounds::from_corners(
+            bounds.origin + point(margin, margin),
+            bounds.bottom_right() - point(margin, margin),
+        );
         if !inner.contains(&p) {
             self.auto_fit = false;
-            let clamped = point(p.x.clamp(inner.left(), inner.right()), p.y.clamp(inner.top(), inner.bottom()));
-            self.pan = self.pan + (clamped - p);
+            let clamped = point(
+                p.x.clamp(inner.left(), inner.right()),
+                p.y.clamp(inner.top(), inner.bottom()),
+            );
+            self.pan += clamped - p;
         }
     }
 
@@ -1123,29 +1218,40 @@ impl NetworkGraph {
                 self.set_selected(Some(self.key_of(item)), cx);
             }
             let target = hit.map_or(Selection::None, |item| self.item_selection(item));
-            cx.emit(NetworkGraphEvent::ContextMenu { target, position: ev.position });
+            cx.emit(NetworkGraphEvent::ContextMenu {
+                target,
+                position: ev.position,
+            });
             return;
         }
         if ev.click_count >= 2 {
-            match hit {
-                Some(Item::Vertex(v)) => match self.vis.vertices[v] {
-                    Vertex::Node(i) => cx.emit(NetworkGraphEvent::NodeActivated(self.nodes[i].clone())),
+            if let Some(Item::Vertex(v)) = hit {
+                match self.vis.vertices[v] {
+                    Vertex::Node(i) => {
+                        cx.emit(NetworkGraphEvent::NodeActivated(self.nodes[i].clone()))
+                    }
                     Vertex::Group(g) => {
                         let id = self.groups[g].id.clone();
                         self.expand_group(&id, cx);
                     }
-                },
-                _ => {}
+                }
             }
             return;
         }
         let kind = match hit {
-            Some(Item::Vertex(ix)) => {
-                DragKind::Vertex { ix, was_pinned: self.vis.bodies[ix].fixed.is_some() }
-            }
-            _ => DragKind::Pan { start_pan: self.pan },
+            Some(Item::Vertex(ix)) => DragKind::Vertex {
+                ix,
+                was_pinned: self.vis.bodies[ix].fixed.is_some(),
+            },
+            _ => DragKind::Pan {
+                start_pan: self.pan,
+            },
         };
-        self.drag = Some(Drag { kind, start: ev.position, moved: false });
+        self.drag = Some(Drag {
+            kind,
+            start: ev.position,
+            moved: false,
+        });
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, inside: bool, cx: &mut Context<Self>) {
@@ -1175,7 +1281,11 @@ impl NetworkGraph {
             cx.notify();
             return;
         }
-        let hovered = if inside { self.hit_test(ev.position) } else { None };
+        let hovered = if inside {
+            self.hit_test(ev.position)
+        } else {
+            None
+        };
         if hovered != self.hovered || hovered.is_some() {
             // Also re-render while hovering so the tooltip follows the pointer.
             self.hovered = hovered;
@@ -1222,17 +1332,23 @@ impl Render for NetworkGraph {
             if reduce_motion {
                 // Settle off-screen instead of animating the layout.
                 let deadline = Instant::now() + REDUCED_MOTION_BUDGET;
-                while self.sim.is_active() && self.sim.alpha_target == 0. && Instant::now() < deadline {
-                    self.sim.tick(&mut vis.bodies, &vis.links, &vis.degrees, &vis.clusters);
+                while self.sim.is_active()
+                    && self.sim.alpha_target == 0.
+                    && Instant::now() < deadline
+                {
+                    self.sim
+                        .tick(&mut vis.bodies, &vis.links, &vis.degrees, &vis.clusters);
                 }
                 if self.sim.alpha_target != 0. {
-                    self.sim.tick(&mut vis.bodies, &vis.links, &vis.degrees, &vis.clusters);
+                    self.sim
+                        .tick(&mut vis.bodies, &vis.links, &vis.degrees, &vis.clusters);
                 }
             } else {
                 // Small graphs can afford two ticks per frame and settle twice as fast.
                 let ticks = if vis.bodies.len() > 1500 { 1 } else { 2 };
                 for _ in 0..ticks {
-                    self.sim.tick(&mut vis.bodies, &vis.links, &vis.degrees, &vis.clusters);
+                    self.sim
+                        .tick(&mut vis.bodies, &vis.links, &vis.degrees, &vis.clusters);
                 }
             }
             if self.auto_fit {
@@ -1292,7 +1408,12 @@ impl Render for NetworkGraph {
 
 /// Mouse handling is registered at the window level during paint so drags keep
 /// tracking outside the graph's bounds.
-fn register_input(entity: &Entity<NetworkGraph>, hitbox: &Hitbox, window: &mut Window, cx: &mut App) {
+fn register_input(
+    entity: &Entity<NetworkGraph>,
+    hitbox: &Hitbox,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let graph = entity.read(cx);
     // Pointing hand is reserved for links; hover state is shown by the halo.
     let cursor = match &graph.drag {

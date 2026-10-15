@@ -43,21 +43,30 @@ impl MemorySource {
             for &ei in self.adjacency.get(&id).into_iter().flatten() {
                 edges.insert(ei);
                 let e = &self.data.edges[ei];
-                let other = if e.source.as_ref() == id { &e.target } else { &e.source };
+                let other = if e.source.as_ref() == id {
+                    &e.target
+                } else {
+                    &e.source
+                };
                 if seen.insert(other.to_string()) {
                     queue.push_back((other.to_string(), d + 1));
                 }
             }
         }
         GraphData::new(
-            self.data.nodes.iter().filter(|n| seen.contains(n.id.as_ref())).cloned().collect(),
-            self
-                .data
+            self.data
+                .nodes
+                .iter()
+                .filter(|n| seen.contains(n.id.as_ref()))
+                .cloned()
+                .collect(),
+            self.data
                 .edges
                 .iter()
                 .enumerate()
                 .filter(|(i, e)| {
-                    edges.contains(i) || (seen.contains(e.source.as_ref()) && seen.contains(e.target.as_ref()))
+                    edges.contains(i)
+                        || (seen.contains(e.source.as_ref()) && seen.contains(e.target.as_ref()))
                 })
                 .map(|(_, e)| e.clone())
                 .collect(),
@@ -106,7 +115,9 @@ impl GraphSource for MemorySource {
 /// Neo4j GDS `gds.louvain.write`); the UI only reads it.
 pub fn sample_movies() -> GraphData {
     let community_of_movie = |title: &str| match title {
-        t if t.starts_with("The Matrix") || t == "Cloud Atlas" || t == "V for Vendetta" => "Wachowski",
+        t if t.starts_with("The Matrix") || t == "Cloud Atlas" || t == "V for Vendetta" => {
+            "Wachowski"
+        }
         "Inception" | "The Dark Knight" | "Interstellar" => "Nolan",
         "John Wick" | "Speed" | "The Devil's Advocate" => "Keanu",
         _ => "Hanks & Ryan",
@@ -136,19 +147,66 @@ pub fn sample_movies() -> GraphData {
         ("The Devil's Advocate", "1997", &["Thriller", "Drama"]),
     ];
     let acted: &[(&str, &[&str])] = &[
-        ("Keanu Reeves", &["The Matrix", "The Matrix Reloaded", "The Matrix Revolutions", "John Wick", "Speed", "The Devil's Advocate"]),
-        ("Carrie-Anne Moss", &["The Matrix", "The Matrix Reloaded", "The Matrix Revolutions"]),
-        ("Laurence Fishburne", &["The Matrix", "The Matrix Reloaded", "The Matrix Revolutions", "John Wick"]),
-        ("Hugo Weaving", &["The Matrix", "The Matrix Reloaded", "The Matrix Revolutions", "Cloud Atlas", "V for Vendetta"]),
+        (
+            "Keanu Reeves",
+            &[
+                "The Matrix",
+                "The Matrix Reloaded",
+                "The Matrix Revolutions",
+                "John Wick",
+                "Speed",
+                "The Devil's Advocate",
+            ],
+        ),
+        (
+            "Carrie-Anne Moss",
+            &[
+                "The Matrix",
+                "The Matrix Reloaded",
+                "The Matrix Revolutions",
+            ],
+        ),
+        (
+            "Laurence Fishburne",
+            &[
+                "The Matrix",
+                "The Matrix Reloaded",
+                "The Matrix Revolutions",
+                "John Wick",
+            ],
+        ),
+        (
+            "Hugo Weaving",
+            &[
+                "The Matrix",
+                "The Matrix Reloaded",
+                "The Matrix Revolutions",
+                "Cloud Atlas",
+                "V for Vendetta",
+            ],
+        ),
         ("Natalie Portman", &["V for Vendetta"]),
-        ("Tom Hanks", &["Cloud Atlas", "Forrest Gump", "Cast Away", "Sleepless in Seattle", "You've Got Mail", "Apollo 13"]),
+        (
+            "Tom Hanks",
+            &[
+                "Cloud Atlas",
+                "Forrest Gump",
+                "Cast Away",
+                "Sleepless in Seattle",
+                "You've Got Mail",
+                "Apollo 13",
+            ],
+        ),
         ("Halle Berry", &["Cloud Atlas"]),
         ("Meg Ryan", &["Sleepless in Seattle", "You've Got Mail"]),
         ("Sandra Bullock", &["Speed"]),
         ("Leonardo DiCaprio", &["Inception"]),
         ("Joseph Gordon-Levitt", &["Inception"]),
         ("Tom Hardy", &["Inception", "The Dark Knight"]),
-        ("Michael Caine", &["Inception", "The Dark Knight", "Interstellar"]),
+        (
+            "Michael Caine",
+            &["Inception", "The Dark Knight", "Interstellar"],
+        ),
         ("Christian Bale", &["The Dark Knight"]),
         ("Heath Ledger", &["The Dark Knight"]),
         ("Matthew McConaughey", &["Interstellar"]),
@@ -158,19 +216,49 @@ pub fn sample_movies() -> GraphData {
         ("Charlize Theron", &["The Devil's Advocate"]),
     ];
     let directed: &[(&str, &[&str])] = &[
-        ("Lana Wachowski", &["The Matrix", "The Matrix Reloaded", "The Matrix Revolutions", "Cloud Atlas"]),
-        ("Lilly Wachowski", &["The Matrix", "The Matrix Reloaded", "The Matrix Revolutions", "Cloud Atlas"]),
+        (
+            "Lana Wachowski",
+            &[
+                "The Matrix",
+                "The Matrix Reloaded",
+                "The Matrix Revolutions",
+                "Cloud Atlas",
+            ],
+        ),
+        (
+            "Lilly Wachowski",
+            &[
+                "The Matrix",
+                "The Matrix Reloaded",
+                "The Matrix Revolutions",
+                "Cloud Atlas",
+            ],
+        ),
         ("Chad Stahelski", &["John Wick"]),
         ("James McTeigue", &["V for Vendetta"]),
-        ("Christopher Nolan", &["Inception", "The Dark Knight", "Interstellar"]),
+        (
+            "Christopher Nolan",
+            &["Inception", "The Dark Knight", "Interstellar"],
+        ),
         ("Robert Zemeckis", &["Forrest Gump", "Cast Away"]),
         ("Nora Ephron", &["Sleepless in Seattle", "You've Got Mail"]),
         ("Ron Howard", &["Apollo 13"]),
         ("Taylor Hackford", &["The Devil's Advocate"]),
     ];
     let produced: &[(&str, &[&str])] = &[
-        ("Joel Silver", &["The Matrix", "The Matrix Reloaded", "The Matrix Revolutions", "V for Vendetta"]),
-        ("Emma Thomas", &["Inception", "The Dark Knight", "Interstellar"]),
+        (
+            "Joel Silver",
+            &[
+                "The Matrix",
+                "The Matrix Reloaded",
+                "The Matrix Revolutions",
+                "V for Vendetta",
+            ],
+        ),
+        (
+            "Emma Thomas",
+            &["Inception", "The Dark Knight", "Interstellar"],
+        ),
     ];
 
     let mut data = GraphData::default();
@@ -189,14 +277,21 @@ pub fn sample_movies() -> GraphData {
                 genres.push(*g);
                 let community = community_of_genre(g);
                 data.nodes.push(
-                    Node::new(id("genre", g), *g, "Genre").property("community", community).group(community),
+                    Node::new(id("genre", g), *g, "Genre")
+                        .property("community", community)
+                        .group(community),
                 );
             }
-            data.edges.push(Edge::new(id("movie", title), id("genre", g), "IN_GENRE"));
+            data.edges
+                .push(Edge::new(id("movie", title), id("genre", g), "IN_GENRE"));
         }
     }
     let mut people: Vec<&str> = Vec::new();
-    for (rel, list) in [("ACTED_IN", acted), ("DIRECTED", directed), ("PRODUCED", produced)] {
+    for (rel, list) in [
+        ("ACTED_IN", acted),
+        ("DIRECTED", directed),
+        ("PRODUCED", produced),
+    ] {
         for (person, titles) in list {
             if !people.contains(person) {
                 people.push(person);
@@ -209,14 +304,27 @@ pub fn sample_movies() -> GraphData {
                 );
             }
             for t in *titles {
-                data.edges.push(Edge::new(id("person", person), id("movie", t), rel));
+                data.edges
+                    .push(Edge::new(id("person", person), id("movie", t), rel));
             }
         }
     }
     // A couple of person-to-person edges, including a parallel pair.
-    data.edges.push(Edge::new(id("person", "Lana Wachowski"), id("person", "Lilly Wachowski"), "SIBLING"));
-    data.edges.push(Edge::new(id("person", "Lilly Wachowski"), id("person", "Lana Wachowski"), "SIBLING"));
-    data.edges.push(Edge::new(id("person", "Keanu Reeves"), id("person", "Laurence Fishburne"), "FOLLOWS"));
+    data.edges.push(Edge::new(
+        id("person", "Lana Wachowski"),
+        id("person", "Lilly Wachowski"),
+        "SIBLING",
+    ));
+    data.edges.push(Edge::new(
+        id("person", "Lilly Wachowski"),
+        id("person", "Lana Wachowski"),
+        "SIBLING",
+    ));
+    data.edges.push(Edge::new(
+        id("person", "Keanu Reeves"),
+        id("person", "Laurence Fishburne"),
+        "FOLLOWS",
+    ));
     data
 }
 
@@ -247,13 +355,18 @@ fn random_graph(n: usize) -> GraphData {
         let links = 1 + (rand() % 2) as usize;
         for _ in 0..links {
             // Mostly inside the community; ~5% bridge to anywhere.
-            let pool = if rand() % 20 == 0 || targets[c].is_empty() { &all } else { &targets[c] };
+            let pool = if rand() % 20 == 0 || targets[c].is_empty() {
+                &all
+            } else {
+                &targets[c]
+            };
             if pool.is_empty() {
                 break;
             }
             let t = pool[(rand() % pool.len() as u64) as usize];
             if t != i {
-                data.edges.push(Edge::new(format!("n{i}"), format!("n{t}"), "LINKS"));
+                data.edges
+                    .push(Edge::new(format!("n{i}"), format!("n{t}"), "LINKS"));
                 targets[c].push(t);
             }
         }

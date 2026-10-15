@@ -15,12 +15,23 @@ use crate::source::{GraphSource, MemorySource, sample_movies};
 
 const MENU_CONTEXT: &str = "GraphContextMenu";
 
-actions!(query_app, [FocusSearch, CloseMenu, MenuNext, MenuPrevious, MenuConfirm]);
+actions!(
+    query_app,
+    [FocusSearch, CloseMenu, MenuNext, MenuPrevious, MenuConfirm]
+);
 
 pub fn init(cx: &mut App) {
     let menu = Some(MENU_CONTEXT);
     cx.bind_keys([
-        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-l" } else { "ctrl-l" }, FocusSearch, None),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-l"
+            } else {
+                "ctrl-l"
+            },
+            FocusSearch,
+            None,
+        ),
         KeyBinding::new("escape", CloseMenu, menu),
         KeyBinding::new("down", MenuNext, menu),
         KeyBinding::new("up", MenuPrevious, menu),
@@ -74,17 +85,21 @@ impl GraphQueryApp {
                     this.run_query(window, cx);
                 }
             }),
-            cx.subscribe_in(&graph, window, |this, _, ev: &NetworkGraphEvent, window, cx| match ev {
-                NetworkGraphEvent::SelectionChanged(selection) => {
-                    this.selection = selection.clone();
-                    cx.notify();
-                }
-                NetworkGraphEvent::NodeActivated(node) => this.expand(&node.id, cx),
-                NetworkGraphEvent::ContextMenu { target, position } => {
-                    this.open_menu(target, *position, window, cx);
-                }
-                _ => cx.notify(),
-            }),
+            cx.subscribe_in(
+                &graph,
+                window,
+                |this, _, ev: &NetworkGraphEvent, window, cx| match ev {
+                    NetworkGraphEvent::SelectionChanged(selection) => {
+                        this.selection = selection.clone();
+                        cx.notify();
+                    }
+                    NetworkGraphEvent::NodeActivated(node) => this.expand(&node.id, cx),
+                    NetworkGraphEvent::ContextMenu { target, position } => {
+                        this.open_menu(target, *position, window, cx);
+                    }
+                    _ => cx.notify(),
+                },
+            ),
             cx.observe_window_appearance(window, |this, window, cx| {
                 apply_theme(window, cx);
                 this.style_input(cx);
@@ -146,7 +161,13 @@ impl GraphQueryApp {
 
     // ---- context menu -------------------------------------------------------
 
-    fn open_menu(&mut self, target: &Selection, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_menu(
+        &mut self,
+        target: &Selection,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let graph = self.graph.read(cx);
         let (title, items) = match target {
             Selection::Node(node) => {
@@ -160,17 +181,27 @@ impl GraphQueryApp {
                     ),
                 ];
                 if let Some(group) = node.group.clone() {
-                    items.push(("Collapse community".into(), MenuCommand::CollapseGroup(group)));
+                    items.push((
+                        "Collapse community".into(),
+                        MenuCommand::CollapseGroup(group),
+                    ));
                 }
                 items.push(("Hide".into(), MenuCommand::Hide(vec![id])));
                 (node.label.clone(), items)
             }
             Selection::Group(group) => {
-                let members = graph.group_members(&group.id).into_iter().map(|n| n.id).collect();
+                let members = graph
+                    .group_members(&group.id)
+                    .into_iter()
+                    .map(|n| n.id)
+                    .collect();
                 (
                     group.label.clone(),
                     vec![
-                        ("Expand community".into(), MenuCommand::ExpandGroup(group.id.clone())),
+                        (
+                            "Expand community".into(),
+                            MenuCommand::ExpandGroup(group.id.clone()),
+                        ),
                         ("Hide members".into(), MenuCommand::Hide(members)),
                     ],
                 )
@@ -179,7 +210,13 @@ impl GraphQueryApp {
         };
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        self.menu = Some(ContextMenu { title, items, highlighted: 0, position, focus });
+        self.menu = Some(ContextMenu {
+            title,
+            items,
+            highlighted: 0,
+            position,
+            focus,
+        });
         cx.notify();
     }
 
@@ -196,8 +233,12 @@ impl GraphQueryApp {
         self.close_menu(window, cx);
         match command {
             MenuCommand::Expand(id) => self.expand(&id, cx),
-            MenuCommand::SetPinned(id, pinned) => self.graph.update(cx, |g, cx| g.set_pinned(&id, pinned, cx)),
-            MenuCommand::CollapseGroup(id) => self.graph.update(cx, |g, cx| g.collapse_group(&id, cx)),
+            MenuCommand::SetPinned(id, pinned) => {
+                self.graph.update(cx, |g, cx| g.set_pinned(&id, pinned, cx))
+            }
+            MenuCommand::CollapseGroup(id) => {
+                self.graph.update(cx, |g, cx| g.collapse_group(&id, cx))
+            }
             MenuCommand::ExpandGroup(id) => self.graph.update(cx, |g, cx| g.expand_group(&id, cx)),
             MenuCommand::Hide(ids) => {
                 let ids: Vec<&str> = ids.iter().map(|s| s.as_ref()).collect();
@@ -240,7 +281,12 @@ impl GraphQueryApp {
             .border_b_1()
             .border_color(t.border)
             .bg(t.surface)
-            .child(div().font_weight(FontWeight::SEMIBOLD).mr_2().child("Graph query"))
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .mr_2()
+                    .child("Graph query"),
+            )
             .child(
                 InputBase::new("query")
                     .flex_1()
@@ -257,26 +303,38 @@ impl GraphQueryApp {
                     })
                     .child(Input::new(&self.query)),
             )
-            .child(primary_button("run", "Run", cx).on_click(cx.listener(|this, _, window, cx| {
-                this.run_query(window, cx);
-            })))
+            .child(
+                primary_button("run", "Run", cx).on_click(cx.listener(|this, _, window, cx| {
+                    this.run_query(window, cx);
+                })),
+            )
             .child(divider(t.border))
-            .child(ghost_button("fit", "Fit", cx).on_click(cx.listener(|this, _, _, cx| {
-                this.graph.update(cx, |g, cx| g.fit_view(cx));
-            })))
+            .child(
+                ghost_button("fit", "Fit", cx).on_click(cx.listener(|this, _, _, cx| {
+                    this.graph.update(cx, |g, cx| g.fit_view(cx));
+                })),
+            )
             .child(
                 ghost_button("zoom-out", "−", cx)
                     .accessibility_label("Zoom out")
-                    .on_click(cx.listener(|this, _, _, cx| this.graph.update(cx, |g, cx| g.zoom_by(0.8, cx)))),
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.graph.update(cx, |g, cx| g.zoom_by(0.8, cx))
+                    })),
             )
             .child(
                 ghost_button("zoom-in", "+", cx)
                     .accessibility_label("Zoom in")
-                    .on_click(cx.listener(|this, _, _, cx| this.graph.update(cx, |g, cx| g.zoom_by(1.25, cx)))),
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.graph.update(cx, |g, cx| g.zoom_by(1.25, cx))
+                    })),
             )
-            .child(ghost_button("relayout", "Re-layout", cx).on_click(cx.listener(|this, _, _, cx| {
-                this.graph.update(cx, |g, cx| g.relayout(cx));
-            })))
+            .child(
+                ghost_button("relayout", "Re-layout", cx).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.graph.update(cx, |g, cx| g.relayout(cx));
+                    },
+                )),
+            )
             .child(self.render_view_options(cx))
     }
 
@@ -289,10 +347,13 @@ impl GraphQueryApp {
             .content(move |_, _, cx| {
                 let g = graph.read(cx);
                 let (label_mode, color_by) = (g.label_mode(), g.color_by());
-                let (arrows, edge_labels, hulls) = (g.has_arrows(), g.has_edge_labels(), g.has_group_hulls());
+                let (arrows, edge_labels, hulls) =
+                    (g.has_arrows(), g.has_edge_labels(), g.has_group_hulls());
                 let set = |f: fn(&mut NetworkGraph, bool, &mut Context<NetworkGraph>)| {
                     let graph = graph.clone();
-                    move |on: bool, _: &mut Window, cx: &mut App| graph.update(cx, |g, cx| f(g, on, cx))
+                    move |on: bool, _: &mut Window, cx: &mut App| {
+                        graph.update(cx, |g, cx| f(g, on, cx))
+                    }
                 };
                 v_flex()
                     .id("view-options-content")
@@ -336,10 +397,18 @@ impl GraphQueryApp {
                             cx,
                         ),
                     ))
-                    .child(option_row("Arrows", switch("arrows", arrows, set(NetworkGraph::set_arrows), cx)))
+                    .child(option_row(
+                        "Arrows",
+                        switch("arrows", arrows, set(NetworkGraph::set_arrows), cx),
+                    ))
                     .child(option_row(
                         "Edge labels",
-                        switch("edge-labels", edge_labels, set(NetworkGraph::set_edge_labels), cx),
+                        switch(
+                            "edge-labels",
+                            edge_labels,
+                            set(NetworkGraph::set_edge_labels),
+                            cx,
+                        ),
                     ))
                     .child(option_row(
                         "Community outlines",
@@ -371,7 +440,11 @@ impl GraphQueryApp {
                     .text_sm()
                     .child(div().size_2p5().rounded_full().bg(c.color))
                     .child(div().flex_1().child(c.name))
-                    .child(div().text_color(t.muted_foreground).child(c.count.to_string()))
+                    .child(
+                        div()
+                            .text_color(t.muted_foreground)
+                            .child(c.count.to_string()),
+                    )
             })))
             .when(!groups.is_empty(), |this| {
                 this.child(div().h(px(1.)).bg(t.border))
@@ -379,13 +452,21 @@ impl GraphQueryApp {
                         h_flex()
                             .items_center()
                             .gap_1()
-                            .child(div().flex_1().child(section_title("Communities", t.muted_foreground)))
-                            .child(ghost_button("collapse-all", "Collapse all", cx).on_click(cx.listener(
-                                |this, _, _, cx| this.graph.update(cx, |g, cx| g.collapse_all_groups(cx)),
-                            )))
-                            .child(ghost_button("expand-all", "Expand all", cx).on_click(cx.listener(
-                                |this, _, _, cx| this.graph.update(cx, |g, cx| g.expand_all_groups(cx)),
-                            ))),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(section_title("Communities", t.muted_foreground)),
+                            )
+                            .child(ghost_button("collapse-all", "Collapse all", cx).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.graph.update(cx, |g, cx| g.collapse_all_groups(cx))
+                                }),
+                            ))
+                            .child(ghost_button("expand-all", "Expand all", cx).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.graph.update(cx, |g, cx| g.expand_all_groups(cx))
+                                }),
+                            )),
                     )
                     .child(v_flex().gap_0p5().children(groups.into_iter().map(|g| {
                         let id = g.id.clone();
@@ -404,10 +485,19 @@ impl GraphQueryApp {
                                 if g.collapsed { "Expand" } else { "Collapse" },
                                 g.label
                             ))
-                            .child(div().w_3().text_color(t.muted_foreground).child(if g.collapsed { "▸" } else { "▾" }))
+                            .child(
+                                div()
+                                    .w_3()
+                                    .text_color(t.muted_foreground)
+                                    .child(if g.collapsed { "▸" } else { "▾" }),
+                            )
                             .child(div().size_2p5().rounded_full().bg(g.color))
                             .child(div().flex_1().child(g.label))
-                            .child(div().text_color(t.muted_foreground).child(g.size.to_string()))
+                            .child(
+                                div()
+                                    .text_color(t.muted_foreground)
+                                    .child(g.size.to_string()),
+                            )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.graph.update(cx, |g, cx| g.toggle_group(&id, cx));
                             }))
@@ -428,12 +518,28 @@ impl GraphQueryApp {
                 let neighbors = graph.neighbors_of(&node.id);
                 v_flex()
                     .gap_3()
-                    .child(heading(node.category.clone(), node.label.clone(), Some(color), t.muted_foreground)
-                        .when(pinned, |this| this.child(div().text_xs().text_color(t.muted_foreground).child("Pinned"))))
+                    .child(
+                        heading(
+                            node.category.clone(),
+                            node.label.clone(),
+                            Some(color),
+                            t.muted_foreground,
+                        )
+                        .when(pinned, |this| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(t.muted_foreground)
+                                    .child("Pinned"),
+                            )
+                        }),
+                    )
                     .child(
                         properties_table(t.border)
                             .child(kv_row("id", node.id.clone(), t.border, t.muted_foreground))
-                            .children(node.properties.iter().map(|(k, v)| kv_row(k.clone(), v.clone(), t.border, t.muted_foreground))),
+                            .children(node.properties.iter().map(|(k, v)| {
+                                kv_row(k.clone(), v.clone(), t.border, t.muted_foreground)
+                            })),
                     )
                     .child(section_title("Neighbors", t.muted_foreground))
                     .child(v_flex().gap_0p5().children(neighbors.into_iter().map(|n| {
@@ -451,7 +557,8 @@ impl GraphQueryApp {
                             .child(div().size_2().rounded_full().bg(graph.color_of(&n, cx)))
                             .child(n.label.clone())
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.graph.update(cx, |g, cx| g.select_node(Some(&id), true, cx));
+                                this.graph
+                                    .update(cx, |g, cx| g.select_node(Some(&id), true, cx));
                             }))
                     })))
                     .into_any_element()
@@ -462,21 +569,37 @@ impl GraphQueryApp {
                 let shown = members.len().min(50);
                 v_flex()
                     .gap_3()
-                    .child(heading("Community (collapsed)".into(), group.label.clone(), Some(group.color), t.muted_foreground))
-                    .child(primary_button("expand-group", "Expand", cx).on_click(cx.listener(move |this, _, _, cx| {
-                        this.graph.update(cx, |g, cx| g.expand_group(&id, cx));
-                    })))
+                    .child(heading(
+                        "Community (collapsed)".into(),
+                        group.label.clone(),
+                        Some(group.color),
+                        t.muted_foreground,
+                    ))
+                    .child(
+                        primary_button("expand-group", "Expand", cx).on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                this.graph.update(cx, |g, cx| g.expand_group(&id, cx));
+                            },
+                        )),
+                    )
                     .child(section_title("Members", t.muted_foreground))
-                    .child(v_flex().gap_0p5().text_sm().children(members.into_iter().take(shown).map(|n| {
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .px_2()
-                            .child(div().size_2().rounded_full().bg(graph.color_of(&n, cx)))
-                            .child(n.label.clone())
-                    })))
+                    .child(v_flex().gap_0p5().text_sm().children(
+                        members.into_iter().take(shown).map(|n| {
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .px_2()
+                                .child(div().size_2().rounded_full().bg(graph.color_of(&n, cx)))
+                                .child(n.label.clone())
+                        }),
+                    ))
                     .when(group.size > shown, |this| {
-                        this.child(div().text_xs().text_color(t.muted_foreground).child(format!("{} more not shown", group.size - shown)))
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(t.muted_foreground)
+                                .child(format!("{} more not shown", group.size - shown)),
+                        )
                     })
                     .into_any_element()
             }
@@ -490,23 +613,45 @@ impl GraphQueryApp {
                 }
                 v_flex()
                     .gap_3()
-                    .child(heading("Merged relationships".into(), format!("{} edges", edges.len()).into(), None, t.muted_foreground))
-                    .child(properties_table(t.border).children(
-                        by_label.into_iter().map(|(label, n)| kv_row(label, n.to_string().into(), t.border, t.muted_foreground)),
+                    .child(heading(
+                        "Merged relationships".into(),
+                        format!("{} edges", edges.len()).into(),
+                        None,
+                        t.muted_foreground,
                     ))
+                    .child(
+                        properties_table(t.border).children(by_label.into_iter().map(
+                            |(label, n)| {
+                                kv_row(label, n.to_string().into(), t.border, t.muted_foreground)
+                            },
+                        )),
+                    )
                     .into_any_element()
             }
             Selection::Edge(edge) => {
-                let source = graph.node(&edge.source).map(|n| n.label.clone()).unwrap_or_default();
-                let target = graph.node(&edge.target).map(|n| n.label.clone()).unwrap_or_default();
+                let source = graph
+                    .node(&edge.source)
+                    .map(|n| n.label.clone())
+                    .unwrap_or_default();
+                let target = graph
+                    .node(&edge.target)
+                    .map(|n| n.label.clone())
+                    .unwrap_or_default();
                 v_flex()
                     .gap_3()
-                    .child(heading("Relationship".into(), edge.label.clone(), None, t.muted_foreground))
+                    .child(heading(
+                        "Relationship".into(),
+                        edge.label.clone(),
+                        None,
+                        t.muted_foreground,
+                    ))
                     .child(
                         properties_table(t.border)
                             .child(kv_row("from", source, t.border, t.muted_foreground))
                             .child(kv_row("to", target, t.border, t.muted_foreground))
-                            .children(edge.properties.iter().map(|(k, v)| kv_row(k.clone(), v.clone(), t.border, t.muted_foreground))),
+                            .children(edge.properties.iter().map(|(k, v)| {
+                                kv_row(k.clone(), v.clone(), t.border, t.muted_foreground)
+                            })),
                     )
                     .into_any_element()
             }
@@ -516,7 +661,9 @@ impl GraphQueryApp {
                 .text_color(t.muted_foreground)
                 .child("Select a node or relationship to see its properties.")
                 .child("Double-click a node to expand it. Right-click for more actions.")
-                .child("Keyboard: arrows move the selection, Enter expands, Shift-F10 opens actions.")
+                .child(
+                    "Keyboard: arrows move the selection, Enter expands, Shift-F10 opens actions.",
+                )
                 .into_any_element(),
         }
     }
@@ -529,7 +676,10 @@ impl GraphQueryApp {
         let t = Theme::global(cx).tokens.colors;
         let (title, hint): (SharedString, SharedString) = match &self.error {
             Some(err) => ("No results".into(), err.clone()),
-            None => ("No results".into(), "Try * to load everything, or another keyword.".into()),
+            None => (
+                "No results".into(),
+                "Try * to load everything, or another keyword.".into(),
+            ),
         };
         Some(
             v_flex()
@@ -552,11 +702,17 @@ impl GraphQueryApp {
                     .id("graph-context-menu")
                     .track_focus(&menu.focus)
                     .key_context(MENU_CONTEXT)
-                    .on_action(cx.listener(|this, _: &CloseMenu, window, cx| this.close_menu(window, cx)))
+                    .on_action(
+                        cx.listener(|this, _: &CloseMenu, window, cx| this.close_menu(window, cx)),
+                    )
                     .on_action(cx.listener(|this, _: &MenuNext, _, cx| this.on_menu_step(1, cx)))
-                    .on_action(cx.listener(|this, _: &MenuPrevious, _, cx| this.on_menu_step(-1, cx)))
+                    .on_action(
+                        cx.listener(|this, _: &MenuPrevious, _, cx| this.on_menu_step(-1, cx)),
+                    )
                     .on_action(cx.listener(Self::on_menu_confirm))
-                    .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_menu(window, cx)))
+                    .on_mouse_down_out(
+                        cx.listener(|this, _, window, cx| this.close_menu(window, cx)),
+                    )
                     .min_w_48()
                     .p_1()
                     .rounded_md()
@@ -566,7 +722,14 @@ impl GraphQueryApp {
                     .shadow_lg()
                     .text_sm()
                     .text_color(t.foreground)
-                    .child(div().px_2().py_1().text_xs().text_color(t.muted_foreground).child(menu.title.clone()))
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_xs()
+                            .text_color(t.muted_foreground)
+                            .child(menu.title.clone()),
+                    )
                     .children(menu.items.iter().enumerate().map(|(ix, (label, command))| {
                         let command = command.clone();
                         Button::new(("menu-item", ix))
@@ -629,16 +792,27 @@ impl Render for GraphQueryApp {
                     .text_xs()
                     .text_color(t.muted_foreground)
                     .child(self.status.clone())
-                    .children(self.error.clone().map(|e| div().text_color(t.destructive).child(e))),
+                    .children(
+                        self.error
+                            .clone()
+                            .map(|e| div().text_color(t.destructive).child(e)),
+                    ),
             )
             .children(self.render_context_menu(cx))
     }
 }
 
 fn apply_theme(window: &Window, cx: &mut App) {
-    let dark = matches!(window.appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark);
+    let dark = matches!(
+        window.appearance(),
+        WindowAppearance::Dark | WindowAppearance::VibrantDark
+    );
     Theme::global_mut(cx).tokens = SemanticThemeTokens {
-        colors: if dark { ColorTokens::dark() } else { ColorTokens::light() },
+        colors: if dark {
+            ColorTokens::dark()
+        } else {
+            ColorTokens::light()
+        },
         ..Default::default()
     };
 }
@@ -679,7 +853,12 @@ fn divider(color: Hsla) -> impl IntoElement {
 }
 
 fn option_row(label: &'static str, control: impl IntoElement) -> impl IntoElement {
-    h_flex().gap_3().items_center().justify_between().child(label).child(control)
+    h_flex()
+        .gap_3()
+        .items_center()
+        .justify_between()
+        .child(label)
+        .child(control)
 }
 
 fn segmented<T: Copy + PartialEq + 'static>(
@@ -706,7 +885,11 @@ fn segmented<T: Copy + PartialEq + 'static>(
                 .py_0p5()
                 .rounded_sm()
                 .text_xs()
-                .text_color(if pressed { t.foreground } else { t.muted_foreground })
+                .text_color(if pressed {
+                    t.foreground
+                } else {
+                    t.muted_foreground
+                })
                 .when(pressed, |this| this.bg(t.background).shadow_sm())
                 .child(label)
                 .on_change(move |_, _, _, cx| on_select(value, cx))
@@ -742,10 +925,19 @@ fn switch(
 }
 
 fn section_title(title: &'static str, color: Hsla) -> impl IntoElement {
-    div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color).child(title)
+    div()
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(color)
+        .child(title)
 }
 
-fn heading(kicker: SharedString, title: SharedString, swatch: Option<Hsla>, muted: Hsla) -> gpui::Div {
+fn heading(
+    kicker: SharedString,
+    title: SharedString,
+    swatch: Option<Hsla>,
+    muted: Hsla,
+) -> gpui::Div {
     v_flex()
         .gap_1()
         .child(
@@ -755,20 +947,40 @@ fn heading(kicker: SharedString, title: SharedString, swatch: Option<Hsla>, mute
                 .children(swatch.map(|c| div().size_2p5().rounded_full().bg(c)))
                 .child(div().text_xs().text_color(muted).child(kicker)),
         )
-        .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(title))
+        .child(
+            div()
+                .text_lg()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(title),
+        )
 }
 
 fn properties_table(border: Hsla) -> gpui::Div {
-    v_flex().rounded_md().border_1().border_color(border).text_sm()
+    v_flex()
+        .rounded_md()
+        .border_1()
+        .border_color(border)
+        .text_sm()
 }
 
-fn kv_row(key: impl Into<SharedString>, value: SharedString, border: Hsla, muted: Hsla) -> impl IntoElement {
+fn kv_row(
+    key: impl Into<SharedString>,
+    value: SharedString,
+    border: Hsla,
+    muted: Hsla,
+) -> impl IntoElement {
     h_flex()
         .px_2()
         .py_1()
         .gap_2()
         .border_b_1()
         .border_color(border)
-        .child(div().w_20().flex_shrink_0().text_color(muted).child(key.into()))
+        .child(
+            div()
+                .w_20()
+                .flex_shrink_0()
+                .text_color(muted)
+                .child(key.into()),
+        )
         .child(div().flex_1().min_w_0().child(value))
 }

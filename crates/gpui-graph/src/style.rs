@@ -58,7 +58,11 @@ impl GraphColors {
 
     /// Readable text color on `fill`.
     pub fn on_fill(&self, fill: Hsla) -> Hsla {
-        if fill.l > 0.62 { self.on_fill_dark } else { self.on_fill_light }
+        if fill.l > 0.62 {
+            self.on_fill_dark
+        } else {
+            self.on_fill_light
+        }
     }
 }
 
@@ -122,7 +126,12 @@ impl Palette {
 
 impl Default for Palette {
     fn default() -> Self {
-        Self(DEFAULT_PALETTE.iter().map(|&c| gpui::rgb(c).into()).collect())
+        Self(
+            DEFAULT_PALETTE
+                .iter()
+                .map(|&c| gpui::rgb(c).into())
+                .collect(),
+        )
     }
 }
 
@@ -131,7 +140,10 @@ impl Default for Palette {
 pub enum NodeSizing {
     Fixed(f32),
     /// Area grows with degree ("node importance"), clamped to `max`.
-    Degree { min: f32, max: f32 },
+    Degree {
+        min: f32,
+        max: f32,
+    },
 }
 
 impl Default for NodeSizing {

@@ -39,7 +39,11 @@ impl Node {
         }
     }
 
-    pub fn property(mut self, key: impl Into<SharedString>, value: impl Into<SharedString>) -> Self {
+    pub fn property(
+        mut self,
+        key: impl Into<SharedString>,
+        value: impl Into<SharedString>,
+    ) -> Self {
         self.properties.push((key.into(), value.into()));
         self
     }
@@ -85,7 +89,11 @@ impl Edge {
         }
     }
 
-    pub fn property(mut self, key: impl Into<SharedString>, value: impl Into<SharedString>) -> Self {
+    pub fn property(
+        mut self,
+        key: impl Into<SharedString>,
+        value: impl Into<SharedString>,
+    ) -> Self {
         self.properties.push((key.into(), value.into()));
         self
     }

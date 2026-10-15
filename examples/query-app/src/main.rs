@@ -23,8 +23,10 @@ fn main() {
             window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
             ..Default::default()
         };
-        cx.open_window(options, |window, cx| cx.new(|cx| app::GraphQueryApp::new(window, cx)))
-            .expect("failed to open window");
+        cx.open_window(options, |window, cx| {
+            cx.new(|cx| app::GraphQueryApp::new(window, cx))
+        })
+        .expect("failed to open window");
         cx.activate(true);
     });
 }

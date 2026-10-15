@@ -21,8 +21,10 @@ mod model;
 mod style;
 mod view;
 
+pub use actions::init;
 pub use layout::ForceConfig;
 pub use model::{Edge, GraphData, Node};
 pub use style::{ColorBy, GraphColors, LabelMode, NodeSizing, Palette};
-pub use actions::init;
-pub use view::{CategoryInfo, GroupInfo, NetworkGraph, NetworkGraphEvent, Selection, TooltipBuilder};
+pub use view::{
+    CategoryInfo, GroupInfo, NetworkGraph, NetworkGraphEvent, Selection, TooltipBuilder,
+};

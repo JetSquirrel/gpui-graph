@@ -1,7 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use gpui::{AppContext as _, TestAppContext};
-use gpui_graph::{Edge, GraphData, NetworkGraphEvent, NetworkGraph, Node, Selection};
+use gpui_graph::{Edge, GraphData, NetworkGraph, NetworkGraphEvent, Node, Selection};
 
 fn sample() -> GraphData {
     GraphData::new(
@@ -26,7 +26,11 @@ fn loads_data_and_drops_dangling_edges(cx: &mut TestAppContext) {
         assert_eq!(g.node_count(), 3);
         assert_eq!(g.edge_count(), 3);
         assert_eq!(g.degree("b"), 3);
-        let cats: Vec<_> = g.categories().into_iter().map(|c| (c.name.to_string(), c.count)).collect();
+        let cats: Vec<_> = g
+            .categories()
+            .into_iter()
+            .map(|c| (c.name.to_string(), c.count))
+            .collect();
         assert_eq!(cats, [("X".into(), 2), ("Y".into(), 1)]);
     });
 }
@@ -53,7 +57,10 @@ fn remove_nodes_remaps_and_clears_lost_selection(cx: &mut TestAppContext) {
     let events = Rc::new(RefCell::new(Vec::new()));
     let sink = events.clone();
     cx.update(|cx| {
-        cx.subscribe(&graph, move |_, e: &NetworkGraphEvent, _| sink.borrow_mut().push(e.clone())).detach();
+        cx.subscribe(&graph, move |_, e: &NetworkGraphEvent, _| {
+            sink.borrow_mut().push(e.clone())
+        })
+        .detach();
     });
 
     graph.update(cx, |g, cx| g.select_node(Some("c"), false, cx));
@@ -70,7 +77,10 @@ fn remove_nodes_remaps_and_clears_lost_selection(cx: &mut TestAppContext) {
     graph.update(cx, |g, cx| g.remove_nodes(&["c"], cx));
     graph.read_with(cx, |g, _| assert!(matches!(g.selection(), Selection::None)));
     let events = events.borrow();
-    assert!(matches!(events.last(), Some(NetworkGraphEvent::SelectionChanged(Selection::None))));
+    assert!(matches!(
+        events.last(),
+        Some(NetworkGraphEvent::SelectionChanged(Selection::None))
+    ));
 }
 
 #[gpui::test]
@@ -113,7 +123,11 @@ fn communities() -> GraphData {
 fn groups_come_from_node_data(cx: &mut TestAppContext) {
     let graph = cx.new(|cx| NetworkGraph::new(cx).with_data(communities()));
     graph.read_with(cx, |g, _| {
-        let groups: Vec<_> = g.groups().into_iter().map(|g| (g.id.to_string(), g.size, g.collapsed)).collect();
+        let groups: Vec<_> = g
+            .groups()
+            .into_iter()
+            .map(|g| (g.id.to_string(), g.size, g.collapsed))
+            .collect();
         assert_eq!(groups, [("A".into(), 3, false), ("B".into(), 2, false)]);
         assert_eq!(g.group_members("B").len(), 2);
     });
@@ -125,7 +139,10 @@ fn collapse_expand_keeps_model_and_emits_events(cx: &mut TestAppContext) {
     let events = Rc::new(RefCell::new(Vec::new()));
     let sink = events.clone();
     cx.update(|cx| {
-        cx.subscribe(&graph, move |_, e: &NetworkGraphEvent, _| sink.borrow_mut().push(e.clone())).detach();
+        cx.subscribe(&graph, move |_, e: &NetworkGraphEvent, _| {
+            sink.borrow_mut().push(e.clone())
+        })
+        .detach();
     });
 
     graph.update(cx, |g, cx| {
@@ -147,11 +164,21 @@ fn collapse_expand_keeps_model_and_emits_events(cx: &mut TestAppContext) {
         .borrow()
         .iter()
         .filter_map(|e| match e {
-            NetworkGraphEvent::GroupToggled { group, collapsed } => Some((group.to_string(), *collapsed)),
+            NetworkGraphEvent::GroupToggled { group, collapsed } => {
+                Some((group.to_string(), *collapsed))
+            }
             _ => None,
         })
         .collect();
-    assert_eq!(toggles, [("A".into(), true), ("B".into(), true), ("A".into(), false), ("B".into(), false)]);
+    assert_eq!(
+        toggles,
+        [
+            ("A".into(), true),
+            ("B".into(), true),
+            ("A".into(), false),
+            ("B".into(), false)
+        ]
+    );
 }
 
 #[gpui::test]
@@ -160,7 +187,10 @@ fn merge_into_collapsed_group_and_remove_last_member(cx: &mut TestAppContext) {
     graph.update(cx, |g, cx| {
         g.collapse_group("B", cx);
         g.merge(
-            GraphData::new(vec![Node::new("b3", "B3", "P").group("B")], vec![Edge::new("b3", "x", "R")]),
+            GraphData::new(
+                vec![Node::new("b3", "B3", "P").group("B")],
+                vec![Edge::new("b3", "x", "R")],
+            ),
             Some("b1"),
             cx,
         );
@@ -193,7 +223,10 @@ fn keyboard_navigation_selects_activates_and_clears(cx: &mut TestAppContext) {
     let events = Rc::new(RefCell::new(Vec::new()));
     let sink = events.clone();
     cx.update(|_, cx| {
-        cx.subscribe(&graph, move |_, e: &NetworkGraphEvent, _| sink.borrow_mut().push(e.clone())).detach();
+        cx.subscribe(&graph, move |_, e: &NetworkGraphEvent, _| {
+            sink.borrow_mut().push(e.clone())
+        })
+        .detach();
     });
 
     // First arrow press picks the node nearest the viewport center.
@@ -204,7 +237,12 @@ fn keyboard_navigation_selects_activates_and_clears(cx: &mut TestAppContext) {
     });
 
     cx.dispatch_action(Activate);
-    assert!(events.borrow().iter().any(|e| matches!(e, NetworkGraphEvent::NodeActivated(n) if n.id == first)));
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, NetworkGraphEvent::NodeActivated(n) if n.id == first))
+    );
 
     cx.dispatch_action(ClearSelection);
     graph.read_with(cx, |g, _| assert!(matches!(g.selection(), Selection::None)));
