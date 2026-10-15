@@ -1,0 +1,14 @@
+[package]
+name = "gpui-graph"
+version = "0.1.0"
+description = "Force-directed network graph component for GPUI, built on gpui-base."
+keywords = ["gpui", "graph", "network", "force-directed", "visualization"]
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gpui.workspace = true
+gpui-base.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

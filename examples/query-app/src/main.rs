@@ -1,5 +1,4 @@
 mod app;
-mod graph;
 mod source;
 
 use gpui::{App, AppContext as _, KeyBinding, WindowBounds, WindowOptions, actions, px, size};

@@ -1,19 +1,26 @@
 use gpui::{
-    App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, WindowAppearance, div, px,
+    App, AppContext as _, Context, Entity, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    MouseButton, ParentElement as _, Pixels, Point, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, WindowAppearance, anchored,
+    deferred, div, px,
 };
 use gpui_base::input::{InputEditorStyle, InputEvent, InputState};
 use gpui_base::{Button, ColorTokens, Input, InputBase, SemanticThemeTokens, Theme, h_flex, v_flex};
+use gpui_graph::{GraphEvent, LabelMode, NetworkGraph, Node, Selection};
 
-use crate::graph::{GraphEvent, LabelMode, NetworkGraph, Node};
 use crate::source::{GraphSource, MemorySource, sample_movies};
+
+struct ContextMenu {
+    node: Node,
+    position: Point<Pixels>,
+}
 
 pub struct GraphQueryApp {
     source: Box<dyn GraphSource>,
     query: Entity<InputState>,
     graph: Entity<NetworkGraph>,
-    selected: Option<Node>,
+    selection: Selection,
+    menu: Option<ContextMenu>,
     status: SharedString,
     error: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
@@ -35,20 +42,24 @@ impl GraphQueryApp {
                     this.run_query(window, cx);
                 }
             }),
-            cx.subscribe(&graph, |this, graph, ev: &GraphEvent, cx| match ev {
-                GraphEvent::SelectionChanged(node) => {
-                    this.selected = node.clone();
+            cx.subscribe(&graph, |this, _, ev: &GraphEvent, cx| match ev {
+                GraphEvent::SelectionChanged(selection) => {
+                    this.selection = selection.clone();
                     cx.notify();
                 }
-                GraphEvent::NodeActivated(node) => {
-                    let data = this.source.expand(&node.id);
-                    graph.update(cx, |g, cx| g.merge(data, Some(&node.id), cx));
-                    this.refresh_status(cx);
+                GraphEvent::NodeActivated(node) => this.expand(&node.id, cx),
+                GraphEvent::ContextMenu { target: Selection::Node(node), position } => {
+                    this.menu = Some(ContextMenu { node: node.clone(), position: *position });
+                    cx.notify();
+                }
+                GraphEvent::ContextMenu { .. } => {
+                    this.menu = None;
+                    cx.notify();
                 }
             }),
             cx.observe_window_appearance(window, |this, window, cx| {
                 apply_theme(window, cx);
-                this.style_input(window, cx);
+                this.style_input(cx);
                 cx.notify();
             }),
         ];
@@ -57,17 +68,18 @@ impl GraphQueryApp {
             source: Box::new(MemorySource::new(sample_movies())),
             query,
             graph,
-            selected: None,
+            selection: Selection::None,
+            menu: None,
             status: "".into(),
             error: None,
             _subscriptions: subscriptions,
         };
-        this.style_input(window, cx);
+        this.style_input(cx);
         this.run_query(window, cx);
         this
     }
 
-    fn style_input(&self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn style_input(&self, cx: &mut Context<Self>) {
         let t = Theme::global(cx).tokens.colors;
         self.query.update(cx, |state, _| {
             state.set_editor_style(InputEditorStyle {
@@ -92,6 +104,12 @@ impl GraphQueryApp {
         self.refresh_status(cx);
     }
 
+    fn expand(&mut self, id: &str, cx: &mut Context<Self>) {
+        let data = self.source.expand(id);
+        self.graph.update(cx, |g, cx| g.merge(data, Some(id), cx));
+        self.refresh_status(cx);
+    }
+
     fn refresh_status(&mut self, cx: &mut Context<Self>) {
         let g = self.graph.read(cx);
         self.status = format!("{} nodes · {} edges", g.node_count(), g.edge_count()).into();
@@ -102,8 +120,8 @@ impl GraphQueryApp {
         let t = Theme::global(cx).tokens.colors;
         let query = self.query.clone();
         let graph = self.graph.read(cx);
-        let label_mode = graph.label_mode;
-        let arrows = graph.show_arrows;
+        let label_mode = graph.label_mode();
+        let arrows = graph.show_arrows();
 
         h_flex()
             .h(px(48.))
@@ -133,7 +151,7 @@ impl GraphQueryApp {
             .child(button("run", "Run", true, cx).on_click(cx.listener(|this, _, window, cx| {
                 this.run_query(window, cx);
             })))
-            .child(divider(t.border))
+            .child(div().w(px(1.)).h(px(20.)).bg(t.border))
             .child(button("fit", "Fit", false, cx).on_click(cx.listener(|this, _, _, cx| {
                 this.graph.update(cx, |g, cx| g.fit_view(cx));
             })))
@@ -153,18 +171,20 @@ impl GraphQueryApp {
                         LabelMode::Auto => "Labels: auto",
                         LabelMode::Always => "Labels: all",
                         LabelMode::Focus => "Labels: focus",
+                        LabelMode::Never => "Labels: off",
                     },
                     false,
                     cx,
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.graph.update(cx, |g, cx| {
-                        g.label_mode = match g.label_mode {
+                        let next = match g.label_mode() {
                             LabelMode::Auto => LabelMode::Always,
                             LabelMode::Always => LabelMode::Focus,
-                            LabelMode::Focus => LabelMode::Auto,
+                            LabelMode::Focus => LabelMode::Never,
+                            LabelMode::Never => LabelMode::Auto,
                         };
-                        cx.notify();
+                        g.set_label_mode(next, cx);
                     });
                     cx.notify();
                 })),
@@ -172,10 +192,7 @@ impl GraphQueryApp {
             .child(
                 button("arrows", if arrows { "Arrows: on" } else { "Arrows: off" }, false, cx).on_click(
                     cx.listener(|this, _, _, cx| {
-                        this.graph.update(cx, |g, cx| {
-                            g.show_arrows = !g.show_arrows;
-                            cx.notify();
-                        });
+                        this.graph.update(cx, |g, cx| g.set_show_arrows(!g.show_arrows(), cx));
                         cx.notify();
                     }),
                 ),
@@ -187,24 +204,38 @@ impl GraphQueryApp {
         let graph = self.graph.read(cx);
         let legend = graph.categories();
 
-        let section = |title: &'static str| {
-            div()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(t.muted_foreground)
-                .child(title)
-        };
-
-        let details = match &self.selected {
-            None => v_flex()
+        let details = match &self.selection {
+            Selection::None => v_flex()
                 .gap_1()
                 .text_sm()
                 .text_color(t.muted_foreground)
-                .child("Click a node to inspect it.")
-                .child("Double-click to expand its neighbors.")
+                .child("Click a node or edge to inspect it.")
+                .child("Double-click a node to expand its neighbors.")
+                .child("Right-click a node for more actions.")
                 .child("Drag nodes · drag background to pan · scroll to zoom."),
-            Some(node) => {
+            Selection::Edge(edge) => {
+                let source = graph.node(&edge.source).map(|n| n.label.clone()).unwrap_or_default();
+                let target = graph.node(&edge.target).map(|n| n.label.clone()).unwrap_or_default();
+                v_flex()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_xs().text_color(t.muted_foreground).child("Relationship"))
+                            .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(edge.label.clone())),
+                    )
+                    .child(
+                        properties_table(t.border)
+                            .child(kv_row("from", source, t.border, t.muted_foreground))
+                            .child(kv_row("to", target, t.border, t.muted_foreground))
+                            .children(edge.properties.iter().map(|(k, v)| {
+                                kv_row(k.clone(), v.clone(), t.border, t.muted_foreground)
+                            })),
+                    )
+            }
+            Selection::Node(node) => {
                 let color = graph.color_of(node);
+                let pinned = graph.is_pinned(&node.id);
                 let neighbors = graph.neighbors_of(&node.id);
                 v_flex()
                     .gap_3()
@@ -216,25 +247,23 @@ impl GraphQueryApp {
                                     .gap_1p5()
                                     .items_center()
                                     .child(div().size_2p5().rounded_full().bg(color))
-                                    .child(div().text_xs().text_color(t.muted_foreground).child(node.category.clone())),
+                                    .child(div().text_xs().text_color(t.muted_foreground).child(node.category.clone()))
+                                    .children(pinned.then(|| {
+                                        div().text_xs().text_color(t.muted_foreground).child("· pinned")
+                                    })),
                             )
                             .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(node.label.clone())),
                     )
                     .child(
-                        v_flex()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(t.border)
-                            .text_sm()
+                        properties_table(t.border)
                             .child(kv_row("id", node.id.clone(), t.border, t.muted_foreground))
                             .children(node.properties.iter().map(|(k, v)| {
                                 kv_row(k.clone(), v.clone(), t.border, t.muted_foreground)
                             })),
                     )
-                    .child(section("NEIGHBORS"))
+                    .child(section_title("NEIGHBORS", t.muted_foreground))
                     .child(v_flex().gap_0p5().children(neighbors.into_iter().map(|n| {
                         let id = n.id.clone();
-                        let color = graph.color_of(&n);
                         h_flex()
                             .id(SharedString::from(format!("nb-{}", n.id)))
                             .gap_2()
@@ -245,10 +274,10 @@ impl GraphQueryApp {
                             .text_sm()
                             .cursor_pointer()
                             .hover(|s| s.bg(t.accent))
-                            .child(div().size_2().rounded_full().bg(color))
+                            .child(div().size_2().rounded_full().bg(graph.color_of(&n)))
                             .child(n.label.clone())
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.graph.update(cx, |g, cx| g.select(Some(&id), true, cx));
+                                this.graph.update(cx, |g, cx| g.select_node(Some(&id), true, cx));
                             }))
                     })))
             }
@@ -265,19 +294,81 @@ impl GraphQueryApp {
             .border_color(t.border)
             .bg(t.surface)
             .overflow_y_scroll()
-            .child(section("LEGEND"))
-            .child(v_flex().gap_1().children(legend.into_iter().map(|(name, color, count)| {
+            .child(section_title("LEGEND", t.muted_foreground))
+            .child(v_flex().gap_1().children(legend.into_iter().map(|c| {
                 h_flex()
                     .gap_2()
                     .items_center()
                     .text_sm()
-                    .child(div().size_2p5().rounded_full().bg(color))
-                    .child(div().flex_1().child(name))
-                    .child(div().text_color(t.muted_foreground).child(count.to_string()))
+                    .child(div().size_2p5().rounded_full().bg(c.color))
+                    .child(div().flex_1().child(c.name))
+                    .child(div().text_color(t.muted_foreground).child(c.count.to_string()))
             })))
             .child(div().h(px(1.)).bg(t.border))
-            .child(section("DETAILS"))
+            .child(section_title("DETAILS", t.muted_foreground))
             .child(details)
+    }
+
+    fn context_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let menu = self.menu.as_ref()?;
+        let t = Theme::global(cx).tokens.colors;
+        let id = menu.node.id.clone();
+        let pinned = self.graph.read(cx).is_pinned(&id);
+
+        let item = |key: &'static str, label: &'static str| {
+            div()
+                .id(key)
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .cursor_pointer()
+                .hover(|s| s.bg(t.accent))
+                .child(label)
+        };
+        let (expand_id, pin_id, hide_id) = (id.clone(), id.clone(), id.clone());
+        Some(deferred(
+            anchored().position(menu.position).snap_to_window().child(
+                v_flex()
+                    .id("graph-context-menu")
+                    .min_w(px(160.))
+                    .p_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(t.border)
+                    .bg(t.surface)
+                    .shadow_lg()
+                    .text_sm()
+                    .text_color(t.foreground)
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.menu = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_xs()
+                            .text_color(t.muted_foreground)
+                            .child(menu.node.label.clone()),
+                    )
+                    .child(item("expand", "Expand neighbors").on_click(cx.listener(move |this, _, _, cx| {
+                        this.menu = None;
+                        this.expand(&expand_id, cx);
+                    })))
+                    .child(item("pin", if pinned { "Unpin" } else { "Pin position" }).on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            this.menu = None;
+                            this.graph.update(cx, |g, cx| g.set_pinned(&pin_id, !pinned, cx));
+                            cx.notify();
+                        },
+                    )))
+                    .child(item("hide", "Hide node").on_click(cx.listener(move |this, _, _, cx| {
+                        this.menu = None;
+                        this.graph.update(cx, |g, cx| g.remove_nodes(&[&hide_id], cx));
+                        this.refresh_status(cx);
+                    }))),
+            ),
+        ))
     }
 }
 
@@ -310,6 +401,7 @@ impl Render for GraphQueryApp {
                     .child(self.status.clone())
                     .children(self.error.clone().map(|e| div().text_color(t.destructive).child(e))),
             )
+            .children(self.context_menu(cx))
     }
 }
 
@@ -343,16 +435,15 @@ fn button(id: &'static str, label: &'static str, primary: bool, cx: &App) -> But
         .child(label)
 }
 
-fn divider(color: gpui::Hsla) -> impl IntoElement {
-    div().w(px(1.)).h(px(20.)).bg(color)
+fn section_title(title: &'static str, color: Hsla) -> impl IntoElement {
+    div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color).child(title)
 }
 
-fn kv_row(
-    key: impl Into<SharedString>,
-    value: SharedString,
-    border: gpui::Hsla,
-    muted: gpui::Hsla,
-) -> impl IntoElement {
+fn properties_table(border: Hsla) -> gpui::Div {
+    v_flex().rounded_md().border_1().border_color(border).text_sm()
+}
+
+fn kv_row(key: impl Into<SharedString>, value: SharedString, border: Hsla, muted: Hsla) -> impl IntoElement {
     h_flex()
         .px_2()
         .py_1()

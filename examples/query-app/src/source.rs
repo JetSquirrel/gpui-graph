@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::graph::{Edge, GraphData, Node};
+use gpui_graph::{Edge, GraphData, Node};
 
 pub trait GraphSource {
     /// Run a query and return the matching subgraph.
