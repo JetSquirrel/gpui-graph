@@ -3,6 +3,11 @@ name = "gpui-graph"
 version = "0.1.0"
 description = "Force-directed network graph component for GPUI, built on gpui-base."
 keywords = ["gpui", "graph", "network", "force-directed", "visualization"]
+categories = ["gui", "visualization"]
+repository = "https://github.com/JetSquirrel/gpui-graph"
+homepage = "https://github.com/JetSquirrel/gpui-graph"
+documentation = "https://docs.rs/gpui-graph"
+readme = "README.md"
 edition.workspace = true
 license.workspace = true
 
