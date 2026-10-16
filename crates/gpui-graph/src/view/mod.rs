@@ -1,7 +1,11 @@
 mod paint;
 mod visual;
 
-use std::{cell::Cell, collections::HashMap, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 use std::time::{Duration, Instant};
 
@@ -178,6 +182,8 @@ pub struct NetworkGraph {
     focus_handle: FocusHandle,
     /// The last interaction came from the keyboard: show focus indicators.
     keyboard_nav: bool,
+    /// Vertices whose label was drawn last frame; they win placement ties.
+    shown_labels: RefCell<HashSet<usize>>,
 
     label_mode: LabelMode,
     color_by: ColorBy,
@@ -226,6 +232,7 @@ impl NetworkGraph {
             pointer: None,
             focus_handle: cx.focus_handle().tab_stop(true),
             keyboard_nav: false,
+            shown_labels: RefCell::default(),
             label_mode: LabelMode::default(),
             color_by: ColorBy::default(),
             arrows: true,
@@ -623,6 +630,8 @@ impl NetworkGraph {
         self.vis = Visual::build(&self.node_bodies, &self.node_group, &groups, &links);
         self.hovered = None;
         self.drag = None;
+        // Vertex indices changed.
+        self.shown_labels.take();
     }
 
     // ---- queries ------------------------------------------------------------
