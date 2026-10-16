@@ -4,6 +4,8 @@ use gpui::{
     div, point, px, quad, size,
 };
 
+use std::{cmp::Ordering, collections::HashSet};
+
 use super::visual::Vertex;
 use super::{Item, NetworkGraph};
 use crate::geometry::{circles_hull, draw_self_loop, segment_may_intersect, smooth_closed};
@@ -324,7 +326,16 @@ impl NetworkGraph {
                 Vertex::Group(g) => self.groups[g].label.clone(),
             };
             if show_label && !text.is_empty() {
-                labels.push((c, rr, text, faded, is_selected || is_hovered || is_group));
+                labels.push(LabelCandidate {
+                    vertex: v,
+                    center: c,
+                    radius: rr,
+                    text,
+                    faded,
+                    emphasized: is_selected || is_hovered || is_group,
+                    // A faded group label must not crowd out the focused nodes' labels.
+                    forced: is_selected || is_hovered || (is_group && !faded),
+                });
             }
         }
 
@@ -333,33 +344,44 @@ impl NetworkGraph {
             .max(metrics.caption.size)
             .min(metrics.label.size * 1.2);
         let line_height = font_size * (metrics.label.line_height / metrics.label.size);
-        // Labels that would overlap one already drawn are left out: the
-        // selected, hovered and group labels first, then bigger nodes first.
-        // Zooming in spreads nodes apart, so more labels fit.
-        let mut labels = labels;
-        labels.sort_by(|a, b| b.4.cmp(&a.4).then(b.1.total_cmp(&a.1)));
+        // Except in `LabelMode::Always`, labels that would overlap one already
+        // drawn are left out, in `label_order`. Zooming in spreads nodes apart,
+        // so more labels fit. Labels shown last frame win ties, so they do not
+        // flicker while the layout is still moving.
+        let avoid_overlap = self.label_mode != LabelMode::Always;
+        let previous = self.shown_labels.take();
+        labels.sort_by(|a, b| label_order(a, b, &previous));
         let mut placed = LabelGrid::default();
-        for (c, r, text, faded, strong) in labels {
-            let text = truncate(&text, 24);
-            let color = if faded {
+        let mut shown = HashSet::with_capacity(labels.len());
+        for label in labels {
+            let text = truncate(&label.text, 24);
+            let color = if label.faded {
                 colors.muted.opacity(0.4)
-            } else if strong {
+            } else if label.emphasized {
                 colors.foreground
             } else {
                 colors.muted
             };
             let line = shape(&text, font_size, color, window);
-            let origin = point(c.x - line.width / 2., c.y + px(r) + metrics.space_xs);
-            let rect = Bounds::new(origin, size(line.width, line_height));
-            if !placed.insert(rect, strong) {
-                continue;
-            }
-            if strong && !faded {
+            let c = label.center;
+            let origin = point(
+                c.x - line.width / 2.,
+                c.y + px(label.radius) + metrics.space_xs,
+            );
+            let chip = (label.emphasized && !label.faded).then(|| {
                 let pad = metrics.space_xs;
-                let chip = Bounds::new(
+                Bounds::new(
                     origin - point(pad, px(0.)),
                     size(line.width + pad * 2., line_height),
-                );
+                )
+            });
+            // Reserve the chip's area too, so no label slides under its edge.
+            let rect = chip.unwrap_or(Bounds::new(origin, size(line.width, line_height)));
+            if !placed.insert(rect, label.forced || !avoid_overlap) {
+                continue;
+            }
+            shown.insert(label.vertex);
+            if let Some(chip) = chip {
                 window.paint_quad(
                     gpui::fill(chip, colors.background.opacity(0.9))
                         .corner_radii(metrics.radius_sm),
@@ -367,6 +389,7 @@ impl NetworkGraph {
             }
             let _ = line.paint(origin, line_height, TextAlign::Left, None, window, cx);
         }
+        self.shown_labels.replace(shown);
 
         if show_focus {
             // Focus-visible ring for the graph itself, inset so ancestors cannot clip it.
@@ -585,6 +608,33 @@ fn truncate(s: &SharedString, max: usize) -> SharedString {
     format!("{t}…").into()
 }
 
+/// A node or group label waiting for a place on screen.
+struct LabelCandidate {
+    vertex: usize,
+    center: Point<Pixels>,
+    radius: f32,
+    text: SharedString,
+    faded: bool,
+    /// Drawn on a chip in the foreground color.
+    emphasized: bool,
+    /// Drawn even if it overlaps another label.
+    forced: bool,
+}
+
+/// Placement priority: forced labels, then labels of items in focus, then
+/// labels shown last frame, then bigger nodes.
+fn label_order(a: &LabelCandidate, b: &LabelCandidate, previous: &HashSet<usize>) -> Ordering {
+    b.forced
+        .cmp(&a.forced)
+        .then(a.faded.cmp(&b.faded))
+        .then(
+            previous
+                .contains(&b.vertex)
+                .cmp(&previous.contains(&a.vertex)),
+        )
+        .then(b.radius.total_cmp(&a.radius))
+}
+
 /// Label rectangles already drawn this frame, bucketed by a coarse grid so a
 /// new label is tested only against its neighbors.
 #[derive(Default)]
@@ -633,8 +683,37 @@ impl LabelGrid {
 
 #[cfg(test)]
 mod label_grid_tests {
-    use super::LabelGrid;
+    use std::collections::HashSet;
+
+    use super::{LabelCandidate, LabelGrid, label_order};
     use gpui::{Bounds, point, px, size};
+
+    fn candidate(vertex: usize, radius: f32, faded: bool, forced: bool) -> LabelCandidate {
+        LabelCandidate {
+            vertex,
+            center: point(px(0.), px(0.)),
+            radius,
+            text: "".into(),
+            faded,
+            emphasized: forced,
+            forced,
+        }
+    }
+
+    #[test]
+    fn focused_labels_beat_faded_bigger_ones() {
+        let mut labels = [
+            candidate(0, 30., true, false),  // big, faded
+            candidate(1, 8., false, false),  // small neighbor in focus
+            candidate(2, 10., false, true),  // hovered
+            candidate(3, 12., false, false), // in focus, shown last frame
+            candidate(4, 12., false, false), // in focus, same size, new
+        ];
+        let previous = HashSet::from([3]);
+        labels.sort_by(|a, b| label_order(a, b, &previous));
+        let order: Vec<usize> = labels.iter().map(|l| l.vertex).collect();
+        assert_eq!(order, [2, 3, 4, 1, 0]);
+    }
 
     fn rect(x: f32, y: f32) -> Bounds<gpui::Pixels> {
         Bounds::new(point(px(x), px(y)), size(px(60.), px(14.)))
@@ -646,7 +725,10 @@ mod label_grid_tests {
         assert!(grid.insert(rect(0., 0.), false));
         assert!(!grid.insert(rect(30., 5.), false), "overlaps the first");
         assert!(grid.insert(rect(0., 40.), false), "clear of it");
-        assert!(grid.insert(rect(30., 5.), true), "forced labels always draw");
+        assert!(
+            grid.insert(rect(30., 5.), true),
+            "forced labels always draw"
+        );
         // Across a grid cell boundary.
         assert!(grid.insert(rect(200., 90.), false));
         assert!(!grid.insert(rect(220., 100.), false));
