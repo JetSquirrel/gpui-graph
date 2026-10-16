@@ -333,6 +333,12 @@ impl NetworkGraph {
             .max(metrics.caption.size)
             .min(metrics.label.size * 1.2);
         let line_height = font_size * (metrics.label.line_height / metrics.label.size);
+        // Labels that would overlap one already drawn are left out: the
+        // selected, hovered and group labels first, then bigger nodes first.
+        // Zooming in spreads nodes apart, so more labels fit.
+        let mut labels = labels;
+        labels.sort_by(|a, b| b.4.cmp(&a.4).then(b.1.total_cmp(&a.1)));
+        let mut placed = LabelGrid::default();
         for (c, r, text, faded, strong) in labels {
             let text = truncate(&text, 24);
             let color = if faded {
@@ -344,6 +350,10 @@ impl NetworkGraph {
             };
             let line = shape(&text, font_size, color, window);
             let origin = point(c.x - line.width / 2., c.y + px(r) + metrics.space_xs);
+            let rect = Bounds::new(origin, size(line.width, line_height));
+            if !placed.insert(rect, strong) {
+                continue;
+            }
             if strong && !faded {
                 let pad = metrics.space_xs;
                 let chip = Bounds::new(
@@ -573,4 +583,72 @@ fn truncate(s: &SharedString, max: usize) -> SharedString {
     }
     let t: String = s.chars().take(max - 1).collect();
     format!("{t}…").into()
+}
+
+/// Label rectangles already drawn this frame, bucketed by a coarse grid so a
+/// new label is tested only against its neighbors.
+#[derive(Default)]
+struct LabelGrid {
+    rects: Vec<Bounds<Pixels>>,
+    cells: std::collections::HashMap<(i32, i32), Vec<usize>>,
+}
+
+impl LabelGrid {
+    const CELL: f32 = 96.;
+    /// Breathing room between neighboring labels.
+    const GAP: f32 = 2.;
+
+    fn cells(rect: Bounds<Pixels>) -> impl Iterator<Item = (i32, i32)> {
+        let cell = |v: Pixels| (f32::from(v) / Self::CELL).floor() as i32;
+        let (x0, x1) = (cell(rect.left()), cell(rect.right()));
+        let (y0, y1) = (cell(rect.top()), cell(rect.bottom()));
+        (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
+    }
+
+    /// Records `rect` unless it overlaps a recorded one; `force` records it
+    /// regardless. Returns whether the label should be drawn.
+    fn insert(&mut self, rect: Bounds<Pixels>, force: bool) -> bool {
+        let padded = Bounds::new(
+            rect.origin - point(px(Self::GAP), px(Self::GAP)),
+            rect.size + size(px(Self::GAP * 2.), px(Self::GAP * 2.)),
+        );
+        if !force {
+            let hit = Self::cells(padded).any(|key| {
+                self.cells
+                    .get(&key)
+                    .is_some_and(|ids| ids.iter().any(|&i| self.rects[i].intersects(&padded)))
+            });
+            if hit {
+                return false;
+            }
+        }
+        let id = self.rects.len();
+        self.rects.push(rect);
+        for key in Self::cells(rect) {
+            self.cells.entry(key).or_default().push(id);
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+mod label_grid_tests {
+    use super::LabelGrid;
+    use gpui::{Bounds, point, px, size};
+
+    fn rect(x: f32, y: f32) -> Bounds<gpui::Pixels> {
+        Bounds::new(point(px(x), px(y)), size(px(60.), px(14.)))
+    }
+
+    #[test]
+    fn overlapping_labels_are_left_out_unless_forced() {
+        let mut grid = LabelGrid::default();
+        assert!(grid.insert(rect(0., 0.), false));
+        assert!(!grid.insert(rect(30., 5.), false), "overlaps the first");
+        assert!(grid.insert(rect(0., 40.), false), "clear of it");
+        assert!(grid.insert(rect(30., 5.), true), "forced labels always draw");
+        // Across a grid cell boundary.
+        assert!(grid.insert(rect(200., 90.), false));
+        assert!(!grid.insert(rect(220., 100.), false));
+    }
 }
