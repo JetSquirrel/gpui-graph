@@ -19,7 +19,7 @@ cargo test -p gpui-graph
 ```toml
 [dependencies]
 gpui-graph = { path = "crates/gpui-graph" }
-gpui-base = "=0.7.3"
+gpui-base = "=0.8.0"
 gpui = { package = "gpui-pre", version = "=0.3.9" }   # 必须与 gpui-base 一致
 ```
 
