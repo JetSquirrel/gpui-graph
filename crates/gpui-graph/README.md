@@ -46,6 +46,8 @@ let subscription = cx.subscribe(&graph, |this, graph, event: &NetworkGraphEvent,
     _ => {}
 });
 
+// Store `subscription` in the owning view to keep it active.
+
 // the graph fills its parent, so give the parent a size
 div().flex_1().child(graph.clone())
 ```
@@ -55,4 +57,4 @@ overview and the `query-app` example.
 
 ## License
 
-Apache-2.0
+Licensed under the [Apache License, Version 2.0](LICENSE).

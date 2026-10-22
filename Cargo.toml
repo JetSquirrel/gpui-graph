@@ -6,6 +6,8 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
+repository = "https://github.com/JetSquirrel/gpui-graph"
+homepage = "https://github.com/JetSquirrel/gpui-graph"
 
 [workspace.dependencies]
 gpui-graph = { path = "crates/gpui-graph" }

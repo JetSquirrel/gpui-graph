@@ -1,5 +1,5 @@
 //! Force-directed network graph component for [GPUI](https://gpui.rs), built on
-//! [gpui-base](https://gpui-kit.com/zh-CN/base/).
+//! [gpui-base](https://gpui-kit.com/base/).
 //!
 //! [`NetworkGraph`] is a stateful view (an `Entity`): it owns the layout,
 //! viewport, hover and selection state across frames. Create it with `cx.new`,

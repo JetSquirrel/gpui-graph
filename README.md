@@ -1,109 +1,218 @@
 # gpui-graph
 
-基于 [gpui-base](https://gpui-kit.com/zh-CN/base/) 的 GPUI 网络图（force-directed graph）组件库。
+A force-directed network graph component for [GPUI](https://www.gpui.rs), built on
+[gpui-base](https://gpui-kit.com/base/). Designed for graph query and exploration
+applications.
 
-```
-crates/gpui-graph     组件库
-examples/basic        最小接入示例
-examples/query-app    图查询工具原型（查询框 / 图例 / 社区列表 / 详情 / 右键菜单）
-```
+- Force simulation with Barnes–Hut repulsion, collision detection, links,
+  gravity, and community clustering.
+- Pan, zoom, node dragging, hover highlighting, node and edge selection,
+  parallel edges, self-loops, arrows, and labels.
+- Incremental updates for expanding neighbors, node removal, and pinning.
+- Data-driven communities with hulls, group colors, and collapsible super nodes.
+- Keyboard navigation, visible focus indicators, and reduced-motion support.
+- Styling based on gpui-base theme tokens, with configurable colors and palettes.
+
+## Quick start
+
+Use stable Rust with the components specified in
+[`rust-toolchain.toml`](rust-toolchain.toml). macOS is the primary platform for
+running the examples and requires the Xcode Command Line Tools. CI also tests
+the library on Linux; see [CONTRIBUTING.md](CONTRIBUTING.md) for setup and checks.
 
 ```sh
-cargo run                 # query-app
-cargo run -p basic
-cargo test -p gpui-graph
+cargo run --locked                 # Launch query-app (the default member)
+cargo run -p basic --locked        # Launch the minimal example
+cargo test -p gpui-graph --locked   # Run library tests
 ```
 
-## 使用
+The query application includes a query input, legend, community list, details
+panel, and context menus. It uses an in-memory data source, so no database or
+credentials are required. Try `*` to show all sample data, `Matrix depth 2` to
+explore a neighborhood, or `random 500` to generate a larger graph.
+
+## Installation
 
 ```toml
 [dependencies]
-gpui-graph = { path = "crates/gpui-graph" }
+gpui-graph = "0.1"
 gpui-base = "=0.8.0"
-gpui = { package = "gpui-pre", version = "=0.3.9" }   # 必须与 gpui-base 一致
+# Must match the GPUI snapshot used by gpui-base.
+gpui = { package = "gpui-pre", version = "=0.3.9" }
 ```
 
-```rust
-use gpui_graph::{Edge, GraphData, LabelMode, NetworkGraph, NetworkGraphEvent, Node, Selection};
+When developing inside this repository, use the workspace dependency or
+`gpui-graph = { path = "crates/gpui-graph" }` from the repository root.
 
-// 启动时：gpui_base::init(cx); gpui_graph::init(cx);  // 注册键盘绑定
+## Usage
+
+Initialize both libraries once when the application starts:
+
+```rust
+gpui_base::init(cx);
+gpui_graph::init(cx); // Register graph keyboard bindings.
+```
+
+Create the graph inside the owning view's context:
+
+```rust
+use gpui::AppContext as _;
+use gpui_graph::{Edge, GraphData, LabelMode, NetworkGraph, Node};
 
 let graph = cx.new(|cx| {
     NetworkGraph::new(cx)
         .with_data(GraphData::new(
-            vec![Node::new("a", "Alice", "Person"), Node::new("x", "Acme", "Company")],
+            vec![
+                Node::new("a", "Alice", "Person").group("team"),
+                Node::new("x", "Acme", "Company").group("team"),
+            ],
             vec![Edge::new("a", "x", "WORKS_AT")],
         ))
         .with_label_mode(LabelMode::Auto)
 });
-
-// 订阅保存在 owner 上（_subscriptions），不要 detach
-let sub = cx.subscribe(&graph, |this, graph, event: &NetworkGraphEvent, cx| match event {
-    NetworkGraphEvent::SelectionChanged(Selection::Node(node)) => { /* 详情面板 */ }
-    NetworkGraphEvent::NodeActivated(node) => {
-        // 双击：查询邻居后增量合并，新节点从该节点周围长出
-        graph.update(cx, |g, cx| g.merge(fetch_neighbors(&node.id), Some(&node.id), cx));
-    }
-    NetworkGraphEvent::ContextMenu { target, position } => { /* 弹出菜单 */ }
-    _ => {}
-});
-
-// 组件填满父容器，父容器需要有尺寸
-div().flex_1().child(graph.clone())
 ```
 
-## API 概览
+Subscribe to events to connect the graph to application UI and data loading:
 
-| 分类 | API |
-|---|---|
-| 构建选项 | `with_data` `with_force_config` `with_label_mode` `with_color_by` `with_palette` `with_node_sizing` `with_colors` `with_tooltip`；布尔：`arrows` `edge_labels` `group_hulls` `sticky_drag` `tooltips` |
-| 数据 | `set_data`（替换并重置视口）`merge(data, anchor)`（增量）`remove_nodes` `clear` `data()` |
-| 视口 | `fit_view` `zoom_by` `relayout` `select_node(id, center)` |
-| 固定 | `set_pinned` `is_pinned` `unpin_all` |
-| 查询 | `node` `degree` `neighbors_of` `edges_of` `categories` `color_of(node, cx)` `resolved_colors` `selection` `zoom` `is_simulating` `has_arrows` `has_edge_labels` `has_group_hulls` `has_tooltips` `is_sticky_drag` |
-| 运行时设置 | `set_label_mode` `set_color_by` `set_arrows` `set_edge_labels` `set_group_hulls` `set_sticky_drag` `set_tooltips` `set_force_config` `set_colors` |
-| 社区 | `groups` `group` `group_members` `collapse_group` `expand_group` `toggle_group` `collapse_all_groups` `expand_all_groups` `set_group_label` |
-| 事件 `NetworkGraphEvent` | `SelectionChanged(Selection)` `NodeActivated(Node)` `GroupToggled { group, collapsed }` `ContextMenu { target, position }` |
-| Action（`gpui_graph::actions`） | `ZoomIn` `ZoomOut` `FitView` `ClearSelection` `SelectLeft/Right/Up/Down` `Activate` `OpenContextMenu` |
+```rust
+use gpui_graph::{NetworkGraphEvent, Selection};
 
-命名遵循 [GPUI Kit 编码指南](https://gpui-kit.com/zh-CN/docs/coding-guides)：非布尔 builder 用 `with_<field>`，布尔 builder 用字段名、reader 用 `is_` / `has_`，可变修改用 `set_<field>`；公开结构体与枚举均为 `#[non_exhaustive]`（`ForceConfig` / `GraphColors` 用 `with_*` 构建）。
+let subscription = cx.subscribe(
+    &graph,
+    |this, graph, event: &NetworkGraphEvent, cx| match event {
+        NetworkGraphEvent::SelectionChanged(Selection::Node(node)) => {
+            // Update your details panel.
+        }
+        NetworkGraphEvent::NodeActivated(node) => {
+            // Double-click or Enter: load neighbors through your data source,
+            // then merge them around the activated node:
+            // graph.update(cx, |g, cx| g.merge(neighbors, Some(&node.id), cx));
+        }
+        NetworkGraphEvent::ContextMenu { target, position } => {
+            // Show a menu at the supplied window coordinates.
+        }
+        _ => {}
+    },
+);
+```
 
-- **社区**：组件不计算社区，读取 `Node::group`（由数据库算好，如 Neo4j GDS Louvain 写回的 `community` 属性）。
-  - 展示：按社区着色、圆角凸包轮廓 + 社区名、布局中的社区聚拢力（`ForceConfig::group_strength`，0 关闭）。
-  - 折叠：社区收成一个超级节点（显示成员数，外圈双环），指向它的边按方向合并成一条加粗边并标 `×N`；双击超级节点展开，成员按折叠前的相对位置还原。
-  - 折叠只改变显示，`data()` / `node_count()` 等仍是完整数据；选中状态按 id 保持，折叠再展开不丢。
-  - `Selection` 新增 `Group(GroupInfo)`（选中超级节点）和 `EdgeBundle(Vec<Edge>)`（选中合并边）。
-- **样式**：颜色、字号、圆角、间距、阴影都取自 gpui-base `Theme` tokens，跟随深浅色与字号缩放；`GraphColors` 可整体覆盖。唯一的原始色值是数据分类色板（base 主题没有图表色角色），默认 AntV，用 `with_palette` 替换为产品主题色。节点上的文字自动选对比度更高的颜色。
-- **节点大小**：`NodeSizing::Degree { min, max }`（默认，按度数）或 `NodeSizing::Fixed(r)`。
-- **Tooltip**：`with_tooltip(|selection, colors, window, cx| Some(element))` 自定义，返回 `None` 隐藏。
-- **布局**：`ForceConfig` 字段与 d3-force 对应（`link_distance` `charge` `theta` `collide_padding` `gravity` `velocity_decay` …）。
+Store the subscription in the owning view to keep it active. The graph fills
+its parent, so give the parent a size, for example
+`div().flex_1().child(graph.clone())` inside a sized flex container.
 
-## 交互
+These snippets are excerpts from a host view. See the
+[complete basic example](examples/basic/src/main.rs) for imports, subscription
+storage, rendering, and window setup, or the [API documentation](https://docs.rs/gpui-graph)
+for type and method details.
 
-指针：滚轮缩放（以光标为中心）· 拖空白平移 · 拖节点 · 单击选中节点/边 · 双击节点 → `NodeActivated`，双击社区 → 展开 · 右键 → `ContextMenu` · 悬停高亮一度邻居 · 布局进行中自动 fit，用户操作视口后停止。
+## API overview
 
-键盘（图是 Tab 停靠点，焦点在图上时生效）：
+| Area | API |
+| --- | --- |
+| Builders | `with_data`, `with_force_config`, `with_label_mode`, `with_color_by`, `with_palette`, `with_node_sizing`, `with_colors`, `with_tooltip`; boolean builders: `arrows`, `edge_labels`, `group_hulls`, `sticky_drag`, `tooltips` |
+| Data | `set_data` (replace data and reset the viewport), `merge(data, anchor)` (incremental update), `remove_nodes`, `clear`, `data`, `node_count`, `edge_count` |
+| Viewport | `fit_view`, `zoom_by`, `relayout`, `select_node(id, center)` |
+| Pinning | `set_pinned`, `is_pinned`, `unpin_all` |
+| Inspection | `node`, `degree`, `neighbors_of`, `edges_of`, `categories`, `color_of(node, cx)`, `resolved_colors`, `selection`, `zoom`, `is_simulating`, `label_mode`, `color_by`, `has_arrows`, `has_edge_labels`, `has_group_hulls`, `has_tooltips`, `is_sticky_drag` |
+| Runtime settings | `set_label_mode`, `set_color_by`, `set_arrows`, `set_edge_labels`, `set_group_hulls`, `set_sticky_drag`, `set_tooltips`, `set_force_config`, `set_colors` |
+| Communities | `groups`, `group`, `group_members`, `collapse_group`, `expand_group`, `toggle_group`, `collapse_all_groups`, `expand_all_groups`, `set_group_label` |
+| Events (`NetworkGraphEvent`) | `SelectionChanged(Selection)`, `NodeActivated(Node)`, `GroupToggled { group, collapsed }`, `ContextMenu { target, position }` |
+| Actions (`gpui_graph::actions`) | `ZoomIn`, `ZoomOut`, `FitView`, `ClearSelection`, `SelectLeft`, `SelectRight`, `SelectUp`, `SelectDown`, `Activate`, `OpenContextMenu` |
 
-| 按键 | 作用 |
-|---|---|
-| ← → ↑ ↓ | 选中该方向最近的节点（无选中时从视口中心开始），必要时平移使其可见 |
-| Enter | 激活：节点发出 `NodeActivated`，社区展开/折叠 |
-| Shift-F10 | 对选中项发出 `ContextMenu`（位置为该项的屏幕坐标） |
-| Esc | 清除选中 |
-| = / - / 0 | 放大 / 缩小 / 适配 |
+Value builders use `with_<field>`, boolean builders use the field name, boolean
+readers use `is_` / `has_`, and mutations use `set_<field>`. Public structs and
+enums are `#[non_exhaustive]`; construct `ForceConfig` and `GraphColors` through
+their provided constructors and `with_*` builders.
 
-键盘操作时显示焦点环（图外框 + 选中项外圈），与选中、悬停样式区分；指针操作时隐藏。光标只在拖动时变为抓手，悬停用光晕表示。
+### Communities
 
-开启系统“减少动态效果”时，布局在后台直接收敛（每帧最多 120ms），视口适配直接跳转，不播放动画。
+The component reads community assignments from `Node::group`; it does not run
+community detection. Supply assignments from your data source, such as a
+community property computed by Neo4j GDS Louvain.
 
-## 实现
+Groups can have distinct colors, rounded convex hulls, and labels. The layout
+can pull group members together through `ForceConfig::group_strength`; set it
+to zero to disable this force.
 
-| 文件 | 说明 |
-|---|---|
-| `layout.rs` | d3-force 风格模拟：link / many-body（Barnes–Hut 四叉树）/ collide（空间哈希）/ gravity / 社区聚拢，alpha 退火 |
-| `view/mod.rs` | `NetworkGraph`：模型层（全部节点、持久位置、社区状态）、API、输入、视口 |
-| `view/visual.rs` | 可见图：由模型 + 折叠状态派生（超级节点、合并边），布局在其上运行 |
-| `view/paint.rs` | `canvas` 绘制：社区轮廓、边按状态批量成 path、节点、标签、tooltip |
-| `geometry.rs` | 直线/二次曲线边的几何、命中检测、凸包与圆角轮廓 |
-| `style.rs` | `GraphColors` `Palette` `NodeSizing` `LabelMode` `ColorBy` |
-| `model.rs` | `Node` `Edge` `GraphData` |
+Collapsing a group creates a super node with a member count and a double ring.
+Edges connected to it are bundled by direction, drawn thicker, and labeled
+`×N`. Double-click the super node to expand it; members recover their relative
+positions from before the collapse.
+
+Collapsing changes only the visual representation. `data()` and `node_count()`
+still describe the full graph, and selection is preserved by ID across collapse
+and expansion. `Selection::Group(GroupInfo)` represents a selected super node;
+`Selection::EdgeBundle(Vec<Edge>)` represents a selected bundle.
+
+### Styling and layout
+
+Colors, typography, corners, spacing, and shadows come from gpui-base theme
+tokens and follow light/dark mode and font scaling. Override graph colors with
+`GraphColors`. The default categorical palette is AntV; replace it with
+`with_palette`. Node text automatically uses the higher-contrast color.
+
+Node sizing defaults to `NodeSizing::Degree { min, max }`. Use
+`NodeSizing::Fixed(radius)` for uniform nodes. Customize tooltips with
+`with_tooltip(|selection, colors, window, cx| Some(element))`; return `None` to
+hide a tooltip.
+
+`ForceConfig` exposes d3-force-style settings such as `link_distance`, `charge`,
+`theta`, `collide_padding`, `gravity`, and `velocity_decay`.
+
+## Interaction
+
+Scroll to zoom around the pointer, drag the background to pan, and drag nodes
+to reposition them. Click a node or edge to select it. Double-click a node to
+emit `NodeActivated`, or double-click a collapsed community to expand it.
+Right-click emits `ContextMenu`. Hovering a node highlights its immediate
+neighbors. The viewport automatically fits the running layout until the user
+interacts with the viewport.
+
+The graph is a Tab stop. These shortcuts apply while it has keyboard focus:
+
+| Key | Action |
+| --- | --- |
+| Arrow keys | Select the nearest node in that direction, starting from the viewport center if nothing is selected; pan to reveal it when needed |
+| Enter | Activate a node (`NodeActivated`) or toggle the selected community |
+| Shift+F10 | Emit `ContextMenu` for the selection at its screen position |
+| Esc | Clear selection |
+| `=` / `-` / `0` | Zoom in / zoom out / fit the graph |
+
+Keyboard interaction shows focus rings around the graph and selected item.
+Pointer interaction hides them. The grab cursor appears during dragging;
+hover feedback uses a halo.
+
+With the system's reduced-motion preference enabled, the simulation settles
+without animated layout steps, using up to 120 ms per frame. Viewport fitting
+jumps directly to its target.
+
+## Project structure
+
+```text
+crates/gpui-graph/       Reusable graph component
+examples/basic/         Minimal embedding example
+examples/query-app/     Interactive graph query application
+.github/workflows/      CI and tagged release workflows
+```
+
+The library implementation lives in `crates/gpui-graph/src/`:
+
+| File | Responsibility |
+| --- | --- |
+| `layout.rs` | Force simulation: links, Barnes–Hut many-body repulsion, spatial-hash collision detection, gravity, group clustering, and alpha cooling |
+| `view/mod.rs` | `NetworkGraph`: full model, persistent positions, community state, public API, input, and viewport |
+| `view/visual.rs` | Visible graph derived from the model and collapsed state, including super nodes and bundled edges; the layout runs on this graph |
+| `view/paint.rs` | Canvas rendering: community hulls, edge paths batched by state, nodes, labels, and tooltips |
+| `geometry.rs` | Straight and quadratic edge geometry, hit testing, convex hulls, and rounded outlines |
+| `style.rs` | `GraphColors`, `Palette`, `NodeSizing`, `LabelMode`, and `ColorBy` |
+| `model.rs` | `Node`, `Edge`, and `GraphData` |
+| `actions.rs` | Graph actions and keyboard bindings |
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development conventions, validation
+commands, and the release process.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
