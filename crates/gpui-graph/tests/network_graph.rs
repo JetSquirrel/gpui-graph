@@ -84,6 +84,16 @@ fn remove_nodes_remaps_and_clears_lost_selection(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn focus_dimming_is_on_by_default_and_can_be_turned_off(cx: &mut TestAppContext) {
+    let graph = cx.new(|cx| NetworkGraph::new(cx).with_data(sample()));
+    graph.update(cx, |g, cx| {
+        assert!(g.focus_dimming());
+        g.set_focus_dimming(false, cx);
+        assert!(!g.focus_dimming());
+    });
+}
+
+#[gpui::test]
 fn pinning_and_data_roundtrip(cx: &mut TestAppContext) {
     let graph = cx.new(|cx| NetworkGraph::new(cx).with_data(sample()));
     graph.update(cx, |g, cx| {

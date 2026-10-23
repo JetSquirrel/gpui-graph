@@ -40,7 +40,9 @@ impl NetworkGraph {
         let selected = self.selected_item();
         let focus = self.hovered.or(selected);
         let vis = &self.vis;
+        let dimming = self.focus_dimming;
         let in_focus = |v: usize| match focus {
+            _ if !dimming => true,
             None => true,
             Some(Item::Vertex(f)) => v == f || vis.neighbors[f].binary_search(&v).is_ok(),
             Some(Item::Edge(e)) => v == vis.edges[e].source || v == vis.edges[e].target,
@@ -80,7 +82,8 @@ impl NetworkGraph {
                     None => EdgeState::Normal,
                     Some(Item::Vertex(f)) if e.source == f || e.target == f => EdgeState::Active,
                     Some(Item::Edge(x)) if x == ei => EdgeState::Active,
-                    Some(_) => EdgeState::Dimmed,
+                    Some(_) if dimming => EdgeState::Dimmed,
+                    Some(_) => EdgeState::Normal,
                 }
             };
             let count = e.edges.len();
@@ -158,7 +161,8 @@ impl NetworkGraph {
 
         let edge_colors = [
             colors.edge,
-            colors.edge.opacity(0.15),
+            // Faded, not gone: the rest of the graph stays a click target.
+            colors.edge.opacity(0.3),
             colors.edge_active,
             colors.selection,
         ];
@@ -196,6 +200,9 @@ impl NetworkGraph {
             }
         }
 
+        // One record of drawn label areas for edge and node labels alike, so
+        // relationship types do not stack on each other or on node names.
+        let mut placed = LabelGrid::default();
         let caption = &metrics.caption;
         for (pos, text, active) in edge_labels {
             let color = if active {
@@ -209,6 +216,9 @@ impl NetworkGraph {
                 point(pos.x - w / 2. - pad, pos.y - h / 2.),
                 size(w + pad * 2., h),
             );
+            if !placed.insert(chip, false) {
+                continue;
+            }
             window.paint_quad(
                 gpui::fill(chip, colors.background.opacity(0.85)).corner_radii(metrics.radius_sm),
             );
@@ -247,7 +257,7 @@ impl NetworkGraph {
                 // A second, outer ring marks a collapsed group.
                 let outer = rr + 3.;
                 let ring_color = if faded {
-                    base.opacity(0.15)
+                    base.opacity(0.3)
                 } else {
                     base.opacity(0.6)
                 };
@@ -272,7 +282,7 @@ impl NetworkGraph {
             } else {
                 colors.background
             };
-            let fill = if faded { base.opacity(0.2) } else { base };
+            let fill = if faded { base.opacity(0.4) } else { base };
             window.paint_quad(quad(
                 circle(c, rr),
                 px(rr),
@@ -298,7 +308,7 @@ impl NetworkGraph {
                 Vertex::Group(g) if rr > 8. => {
                     let text: SharedString = self.groups[g].members.len().to_string().into();
                     let font = px((rr * 0.6).clamp(9., 18.));
-                    let on_fill = colors.on_fill(base).opacity(if faded { 0.4 } else { 1. });
+                    let on_fill = colors.on_fill(base).opacity(if faded { 0.6 } else { 1. });
                     let line = shape(&text, font, on_fill, window);
                     let origin = point(c.x - line.width / 2., c.y - font * 0.6);
                     let _ = line.paint(origin, font * 1.2, TextAlign::Left, None, window, cx);
@@ -318,7 +328,10 @@ impl NetworkGraph {
                 LabelMode::Never => false,
                 _ if is_group => true,
                 LabelMode::Always => true,
-                LabelMode::Auto => (focus.is_none() && zoom >= 0.7) || (focus.is_some() && !faded),
+                // At any zoom: the overlap check below keeps the labels that
+                // fit, biggest (best connected) nodes first, so a dense graph
+                // shows its hubs by name and zooming in names the rest.
+                LabelMode::Auto => !faded,
                 LabelMode::Focus => focus.is_some() && !faded,
             };
             let text = match vis.vertices[v] {
@@ -351,12 +364,25 @@ impl NetworkGraph {
         let avoid_overlap = self.label_mode != LabelMode::Always;
         let previous = self.shown_labels.take();
         labels.sort_by(|a, b| label_order(a, b, &previous));
-        let mut placed = LabelGrid::default();
         let mut shown = HashSet::with_capacity(labels.len());
         for label in labels {
             let text = truncate(&label.text, 24);
+            // Most labels of a dense graph do not fit: test an estimate first
+            // and shape only the ones that may.
+            if avoid_overlap && !label.forced {
+                let estimate = Bounds::new(
+                    point(
+                        label.center.x - estimated_width(&text, font_size) / 2.,
+                        label.center.y + px(label.radius) + metrics.space_xs,
+                    ),
+                    size(estimated_width(&text, font_size), line_height),
+                );
+                if !placed.fits(estimate) {
+                    continue;
+                }
+            }
             let color = if label.faded {
-                colors.muted.opacity(0.4)
+                colors.muted.opacity(0.6)
             } else if label.emphasized {
                 colors.foreground
             } else {
@@ -608,6 +634,16 @@ fn truncate(s: &SharedString, max: usize) -> SharedString {
     format!("{t}…").into()
 }
 
+/// About how wide `text` sets at `font_size`, without shaping it: wide
+/// (CJK) characters take a full em, others about half and a bit.
+fn estimated_width(text: &str, font_size: Pixels) -> Pixels {
+    let ems: f32 = text
+        .chars()
+        .map(|c| if c.len_utf8() >= 3 { 1. } else { 0.56 })
+        .sum();
+    font_size * ems
+}
+
 /// A node or group label waiting for a place on screen.
 struct LabelCandidate {
     vertex: usize,
@@ -655,22 +691,24 @@ impl LabelGrid {
         (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
     }
 
-    /// Records `rect` unless it overlaps a recorded one; `force` records it
-    /// regardless. Returns whether the label should be drawn.
-    fn insert(&mut self, rect: Bounds<Pixels>, force: bool) -> bool {
+    /// Whether `rect` overlaps no recorded one.
+    fn fits(&self, rect: Bounds<Pixels>) -> bool {
         let padded = Bounds::new(
             rect.origin - point(px(Self::GAP), px(Self::GAP)),
             rect.size + size(px(Self::GAP * 2.), px(Self::GAP * 2.)),
         );
-        if !force {
-            let hit = Self::cells(padded).any(|key| {
-                self.cells
-                    .get(&key)
-                    .is_some_and(|ids| ids.iter().any(|&i| self.rects[i].intersects(&padded)))
-            });
-            if hit {
-                return false;
-            }
+        !Self::cells(padded).any(|key| {
+            self.cells
+                .get(&key)
+                .is_some_and(|ids| ids.iter().any(|&i| self.rects[i].intersects(&padded)))
+        })
+    }
+
+    /// Records `rect` unless it overlaps a recorded one; `force` records it
+    /// regardless. Returns whether the label should be drawn.
+    fn insert(&mut self, rect: Bounds<Pixels>, force: bool) -> bool {
+        if !force && !self.fits(rect) {
+            return false;
         }
         let id = self.rects.len();
         self.rects.push(rect);
@@ -685,8 +723,26 @@ impl LabelGrid {
 mod label_grid_tests {
     use std::collections::HashSet;
 
-    use super::{LabelCandidate, LabelGrid, label_order};
+    use super::{LabelCandidate, LabelGrid, estimated_width, label_order};
     use gpui::{Bounds, point, px, size};
+
+    #[test]
+    fn wide_characters_are_estimated_wider() {
+        let latin = estimated_width("abcd", px(10.));
+        let cjk = estimated_width("资讯密度", px(10.));
+        assert!(latin < cjk, "{latin:?} vs {cjk:?}");
+        assert_eq!(cjk, px(40.));
+    }
+
+    #[test]
+    fn fits_is_insert_without_recording() {
+        let mut grid = LabelGrid::default();
+        let rect = Bounds::new(point(px(0.), px(0.)), size(px(40.), px(10.)));
+        assert!(grid.fits(rect));
+        assert!(grid.fits(rect), "a test records nothing");
+        assert!(grid.insert(rect, false));
+        assert!(!grid.fits(rect));
+    }
 
     fn candidate(vertex: usize, radius: f32, faded: bool, forced: bool) -> LabelCandidate {
         LabelCandidate {
