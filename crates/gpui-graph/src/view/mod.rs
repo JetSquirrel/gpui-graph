@@ -13,8 +13,8 @@ use gpui::{
     AnyElement, App, Bounds, ContentMask, Context, CursorStyle, DispatchPhase, Entity,
     EventEmitter, FocusHandle, Focusable, Hitbox, HitboxBehavior, Hsla, InteractiveElement as _,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
-    Pixels, Point, Render, ScrollWheelEvent, SharedString, Styled as _, Window, canvas, div, point,
-    px,
+    PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Styled as _,
+    Window, canvas, div, point, px,
 };
 
 use crate::actions::{
@@ -189,6 +189,8 @@ pub struct NetworkGraph {
     color_by: ColorBy,
     arrows: bool,
     edge_labels: bool,
+    /// Whether items outside the hovered / selected one's neighborhood fade.
+    focus_dimming: bool,
     group_hulls: bool,
     /// Dragged nodes stay where they are dropped.
     sticky_drag: bool,
@@ -237,6 +239,7 @@ impl NetworkGraph {
             color_by: ColorBy::default(),
             arrows: true,
             edge_labels: true,
+            focus_dimming: true,
             group_hulls: true,
             sticky_drag: false,
             palette: Palette::default(),
@@ -356,6 +359,20 @@ impl NetworkGraph {
 
     pub fn has_edge_labels(&self) -> bool {
         self.edge_labels
+    }
+
+    /// Whether hovering or selecting an item fades everything outside its
+    /// neighborhood. Off, the item and its edges are still emphasized, and
+    /// every other node stays as readable — and as easy to aim at — as before.
+    pub fn set_focus_dimming(&mut self, dimming: bool, cx: &mut Context<Self>) {
+        if self.focus_dimming != dimming {
+            self.focus_dimming = dimming;
+            cx.notify();
+        }
+    }
+
+    pub fn focus_dimming(&self) -> bool {
+        self.focus_dimming
     }
 
     pub fn set_edge_labels(&mut self, edge_labels: bool, cx: &mut Context<Self>) {
@@ -1324,11 +1341,27 @@ impl NetworkGraph {
         cx.notify();
     }
 
+    /// A trackpad's two-finger drag pans, as in maps and design tools, and a
+    /// pinch zooms (`on_pinch`); a mouse wheel, or any scroll with ⌘ or Ctrl
+    /// held, zooms around the pointer.
     fn on_scroll(&mut self, ev: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        let delta = ev.delta.pixel_delta(px(20.));
-        let factor = (-delta.y.as_f32() * 0.0025).exp();
         self.auto_fit = false;
-        self.zoom_around(ev.position, factor);
+        match ev.delta {
+            ScrollDelta::Pixels(delta) if !(ev.modifiers.platform || ev.modifiers.control) => {
+                self.pan += delta;
+            }
+            _ => {
+                let delta = ev.delta.pixel_delta(px(20.));
+                let factor = (-delta.y.as_f32() * 0.0025).exp();
+                self.zoom_around(ev.position, factor);
+            }
+        }
+        cx.notify();
+    }
+
+    fn on_pinch(&mut self, ev: &PinchEvent, cx: &mut Context<Self>) {
+        self.auto_fit = false;
+        self.zoom_around(ev.position, (1. + ev.delta).max(0.1));
         cx.notify();
     }
 }
@@ -1459,6 +1492,12 @@ fn register_input(
     window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, window, cx| {
         if phase == DispatchPhase::Bubble && h.should_handle_scroll(window) {
             e.update(cx, |this, cx| this.on_scroll(ev, cx));
+        }
+    });
+    let (e, h) = (entity.clone(), hitbox.clone());
+    window.on_mouse_event(move |ev: &PinchEvent, phase, window, cx| {
+        if phase == DispatchPhase::Bubble && h.is_hovered(window) {
+            e.update(cx, |this, cx| this.on_pinch(ev, cx));
         }
     });
 }
