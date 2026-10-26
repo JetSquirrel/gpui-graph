@@ -200,38 +200,9 @@ impl NetworkGraph {
             }
         }
 
-        // One record of drawn label areas for edge and node labels alike, so
+        // One record of drawn label areas for node and edge labels alike, so
         // relationship types do not stack on each other or on node names.
         let mut placed = LabelGrid::default();
-        let caption = &metrics.caption;
-        for (pos, text, active) in edge_labels {
-            let color = if active {
-                colors.foreground
-            } else {
-                colors.muted
-            };
-            let line = shape(&text, caption.size, color, window);
-            let (w, h, pad) = (line.width, caption.line_height, metrics.space_xs);
-            let chip = Bounds::new(
-                point(pos.x - w / 2. - pad, pos.y - h / 2.),
-                size(w + pad * 2., h),
-            );
-            if !placed.insert(chip, false) {
-                continue;
-            }
-            window.paint_quad(
-                gpui::fill(chip, colors.background.opacity(0.85)).corner_radii(metrics.radius_sm),
-            );
-            let _ = line.paint(
-                point(pos.x - w / 2., pos.y - h / 2.),
-                h,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
-        }
-
         // Vertices, then labels above all of them.
         let mut labels = Vec::new();
         for (v, b) in vis.bodies.iter().enumerate() {
@@ -416,6 +387,38 @@ impl NetworkGraph {
             let _ = line.paint(origin, line_height, TextAlign::Left, None, window, cx);
         }
         self.shown_labels.replace(shown);
+
+        // Relationship types last, in the room node names left: "CALLS" on
+        // every edge around a hub must not crowd out the hub's name.
+        let caption = &metrics.caption;
+        for (pos, text, active) in edge_labels {
+            let color = if active {
+                colors.foreground
+            } else {
+                colors.muted
+            };
+            let line = shape(&text, caption.size, color, window);
+            let (w, h, pad) = (line.width, caption.line_height, metrics.space_xs);
+            let chip = Bounds::new(
+                point(pos.x - w / 2. - pad, pos.y - h / 2.),
+                size(w + pad * 2., h),
+            );
+            // The edge in focus keeps its type even over a node name.
+            if !placed.insert(chip, active) {
+                continue;
+            }
+            window.paint_quad(
+                gpui::fill(chip, colors.background.opacity(0.85)).corner_radii(metrics.radius_sm),
+            );
+            let _ = line.paint(
+                point(pos.x - w / 2., pos.y - h / 2.),
+                h,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        }
 
         if show_focus {
             // Focus-visible ring for the graph itself, inset so ancestors cannot clip it.
