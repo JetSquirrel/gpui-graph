@@ -13,8 +13,8 @@ use gpui::{
     AnyElement, App, Bounds, ContentMask, Context, CursorStyle, DispatchPhase, Entity,
     EventEmitter, FocusHandle, Focusable, Hitbox, HitboxBehavior, Hsla, InteractiveElement as _,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
-    PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Styled as _,
-    Window, canvas, div, point, px,
+    PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollEvent, SharedString, Styled as _, Window,
+    canvas, div, point, px,
 };
 
 use crate::actions::{
@@ -1344,7 +1344,7 @@ impl NetworkGraph {
     /// A trackpad's two-finger drag pans, as in maps and design tools, and a
     /// pinch zooms (`on_pinch`); a mouse wheel, or any scroll with ⌘ or Ctrl
     /// held, zooms around the pointer.
-    fn on_scroll(&mut self, ev: &ScrollWheelEvent, cx: &mut Context<Self>) {
+    fn on_scroll(&mut self, ev: &ScrollEvent, cx: &mut Context<Self>) {
         self.auto_fit = false;
         match ev.delta {
             ScrollDelta::Pixels(delta) if !(ev.modifiers.platform || ev.modifiers.control) => {
@@ -1489,7 +1489,7 @@ fn register_input(
         }
     });
     let (e, h) = (entity.clone(), hitbox.clone());
-    window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, window, cx| {
+    window.on_mouse_event(move |ev: &ScrollEvent, phase, window, cx| {
         if phase == DispatchPhase::Bubble && h.should_handle_scroll(window) {
             e.update(cx, |this, cx| this.on_scroll(ev, cx));
         }

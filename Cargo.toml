@@ -11,10 +11,10 @@ homepage = "https://github.com/JetSquirrel/gpui-graph"
 
 [workspace.dependencies]
 gpui-graph = { path = "crates/gpui-graph" }
-gpui-base = "=0.8.0"
-# Must match the GPUI snapshot that gpui-base 0.8.0 was built against.
-gpui = { package = "gpui-pre", version = "=0.3.9" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit"] }
+gpui-base = "=0.8.1"
+# Must match the GPUI snapshot that gpui-base 0.8.1 was built against.
+gpui = { package = "gpui-pre", version = "=0.3.10" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit"] }
 
 [profile.dev.package."*"]
 opt-level = 2
