@@ -1,4 +1,4 @@
-use gpui::{Bounds, PathBuilder, Pixels, Point, point, px};
+use gpui::{Bounds, Path, PathBuilder, Pixels, Point, point, px};
 
 pub(crate) fn segment_may_intersect(b: Bounds<Pixels>, p: Point<Pixels>, q: Point<Pixels>) -> bool {
     let (x0, x1) = (p.x.min(q.x), p.x.max(q.x));
@@ -6,16 +6,84 @@ pub(crate) fn segment_may_intersect(b: Bounds<Pixels>, p: Point<Pixels>, q: Poin
     !(x1 < b.left() || x0 > b.right() || y1 < b.top() || y0 > b.bottom())
 }
 
-pub(crate) fn draw_self_loop(path: &mut PathBuilder, c: Point<Pixels>, r: f32) {
+/// Edges and arrowheads as ready-made triangles, so painting thousands of
+/// them skips lyon's tessellators. Lyon's fill sweep spends most of a frame
+/// on overlapping arrowheads around a hub, and both tessellators index with
+/// `u16`, so a batch past 65,535 vertices fails as a whole and draws nothing.
+pub(crate) struct TriangleBatch {
+    path: Option<Path<Pixels>>,
+    width: f32,
+}
+
+impl TriangleBatch {
+    /// Solid fill: gpui's path shader fills a triangle whose `st` is (0, 1).
+    const SOLID: (Point<f32>, Point<f32>, Point<f32>) =
+        (point(0., 1.), point(0., 1.), point(0., 1.));
+
+    pub fn new(width: f32) -> Self {
+        Self { path: None, width }
+    }
+
+    pub fn triangle(&mut self, a: Point<Pixels>, b: Point<Pixels>, c: Point<Pixels>) {
+        self.path
+            .get_or_insert_with(|| Path::new(a))
+            .push_triangle((a, b, c), Self::SOLID);
+    }
+
+    /// A straight stroke from `a` to `b`, as a quad.
+    pub fn line(&mut self, a: Point<Pixels>, b: Point<Pixels>) {
+        let (dx, dy) = ((b.x - a.x).as_f32(), (b.y - a.y).as_f32());
+        let len = dx.hypot(dy);
+        if len < 1e-3 {
+            return;
+        }
+        let half = self.width / 2.;
+        let (nx, ny) = (px(-dy / len * half), px(dx / len * half));
+        let (a0, a1) = (point(a.x + nx, a.y + ny), point(a.x - nx, a.y - ny));
+        let (b0, b1) = (point(b.x + nx, b.y + ny), point(b.x - nx, b.y - ny));
+        self.triangle(a0, a1, b0);
+        self.triangle(a1, b1, b0);
+    }
+
+    /// A stroke through `points`. Thin edges need no joins: the gap at a
+    /// bend is a fraction of a pixel.
+    pub fn polyline(&mut self, points: impl IntoIterator<Item = Point<Pixels>>) {
+        let mut points = points.into_iter();
+        let Some(mut prev) = points.next() else {
+            return;
+        };
+        for p in points {
+            self.line(prev, p);
+            prev = p;
+        }
+    }
+
+    pub fn build(self) -> Option<Path<Pixels>> {
+        self.path
+    }
+}
+
+/// Segments to flatten a curve of about `len` screen pixels into.
+pub(crate) fn curve_steps(len: f32) -> usize {
+    ((len / 12.).ceil() as usize).clamp(4, 24)
+}
+
+pub(crate) fn draw_self_loop(batch: &mut TriangleBatch, c: Point<Pixels>, r: f32) {
     let s = r.max(6.);
-    let start = point(c.x + px(r * 0.6), c.y - px(r * 0.8));
-    let end = point(c.x + px(r * 0.8), c.y - px(r * 0.6));
-    path.move_to(start);
-    path.cubic_bezier_to(
-        end,
-        point(c.x + px(s * 1.2), c.y - px(s * 3.)),
-        point(c.x + px(s * 3.), c.y - px(s * 1.2)),
-    );
+    let (cx, cy) = (c.x.as_f32(), c.y.as_f32());
+    let p0 = (cx + r * 0.6, cy - r * 0.8);
+    let p1 = (cx + s * 1.2, cy - s * 3.);
+    let p2 = (cx + s * 3., cy - s * 1.2);
+    let p3 = (cx + r * 0.8, cy - r * 0.6);
+    let steps = curve_steps(s * 6.);
+    batch.polyline((0..=steps).map(|k| {
+        let t = k as f32 / steps as f32;
+        let u = 1. - t;
+        let f = |a: f32, b: f32, c: f32, d: f32| {
+            u * u * u * a + 3. * u * u * t * b + 3. * u * t * t * c + t * t * t * d
+        };
+        point(px(f(p0.0, p1.0, p2.0, p3.0)), px(f(p0.1, p1.1, p2.1, p3.1)))
+    }));
 }
 
 /// A straight or quadratic edge between two screen points.
@@ -61,12 +129,31 @@ impl EdgeGeometry {
         }
     }
 
-    pub fn point_from_start(&self, d: f32) -> Point<Pixels> {
-        self.eval((d / self.approx_len().max(1.)).min(0.5))
+    /// Curve parameter about `d` pixels in from the start.
+    pub fn t_from_start(&self, d: f32) -> f32 {
+        (d / self.approx_len().max(1.)).min(0.5)
+    }
+
+    /// Curve parameter about `d` pixels in from the end.
+    pub fn t_from_end(&self, d: f32) -> f32 {
+        1. - self.t_from_start(d)
     }
 
     pub fn point_from_end(&self, d: f32) -> Point<Pixels> {
-        self.eval(1. - (d / self.approx_len().max(1.)).min(0.5))
+        self.eval(self.t_from_end(d))
+    }
+
+    /// Strokes the curve from parameter `t0` to `t1` into `batch`.
+    pub fn stroke(&self, batch: &mut TriangleBatch, t0: f32, t1: f32) {
+        match self.ctrl {
+            None => batch.line(self.eval(t0), self.eval(t1)),
+            Some(_) => {
+                let steps = curve_steps(self.approx_len() * (t1 - t0));
+                batch.polyline(
+                    (0..=steps).map(|k| self.eval(t0 + (t1 - t0) * k as f32 / steps as f32)),
+                );
+            }
+        }
     }
 
     pub fn midpoint(&self) -> Point<Pixels> {
@@ -189,6 +276,45 @@ mod tests {
         let hull = convex_hull(pts);
         assert_eq!(hull.len(), 4);
         assert!(!hull.contains(&(5., 5.)));
+    }
+
+    #[test]
+    fn large_batches_are_not_dropped() {
+        // Past lyon's u16 index limit, which used to drop the whole batch.
+        let mut batch = TriangleBatch::new(1.2);
+        for i in 0..20_000 {
+            let y = px((i % 900) as f32);
+            batch.line(point(px(0.), y), point(px(1600.), y));
+            batch.triangle(
+                point(px(0.), y),
+                point(px(8.), y),
+                point(px(4.), y + px(6.)),
+            );
+        }
+        let path = batch.build().expect("non-empty batch builds");
+        assert_eq!(path.vertices.len(), 20_000 * 9);
+    }
+
+    #[test]
+    fn stroke_covers_trimmed_curve() {
+        let g = EdgeGeometry::new(point(px(0.), px(0.)), point(px(100.), px(0.)), 20.);
+        let mut batch = TriangleBatch::new(2.);
+        g.stroke(&mut batch, g.t_from_start(10.), g.t_from_end(10.));
+        let path = batch.build().unwrap();
+        // Several segments, two triangles each, bulging toward the control point.
+        assert!(path.vertices.len() >= 4 * 6);
+        let min_y = path
+            .vertices
+            .iter()
+            .map(|v| v.xy_position.y.as_f32())
+            .fold(f32::MAX, f32::min);
+        let max_y = path
+            .vertices
+            .iter()
+            .map(|v| v.xy_position.y.as_f32())
+            .fold(f32::MIN, f32::max);
+        assert!(max_y - min_y > 15., "{min_y}..{max_y}");
+        assert!(TriangleBatch::new(1.).build().is_none());
     }
 
     #[test]
