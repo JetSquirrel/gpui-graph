@@ -176,6 +176,8 @@ pub struct NetworkGraph {
     bounds: Rc<Cell<Bounds<Pixels>>>,
 
     hovered: Option<Item>,
+    /// The pointer moved since `hovered` was last hit-tested.
+    hover_stale: bool,
     selected: Option<SelectionKey>,
     drag: Option<Drag>,
     pointer: Option<Point<Pixels>>,
@@ -229,6 +231,7 @@ impl NetworkGraph {
             auto_fit: true,
             bounds: Rc::new(Cell::new(Bounds::default())),
             hovered: None,
+            hover_stale: false,
             selected: None,
             drag: None,
             pointer: None,
@@ -1307,14 +1310,12 @@ impl NetworkGraph {
             cx.notify();
             return;
         }
-        let hovered = if inside {
-            self.hit_test(ev.position)
-        } else {
-            None
-        };
-        if hovered != self.hovered || hovered.is_some() {
-            // Also re-render while hovering so the tooltip follows the pointer.
-            self.hovered = hovered;
+        // Hit-testing every edge takes about half a millisecond on a large
+        // graph, and a high-rate mouse sends several moves per frame: test
+        // once per frame, in `render`, at the latest position. Re-render
+        // while hovering, too, so the tooltip follows the pointer.
+        if inside || self.hovered.is_some() {
+            self.hover_stale = true;
             cx.notify();
         }
     }
@@ -1368,6 +1369,9 @@ impl NetworkGraph {
 
 impl Render for NetworkGraph {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.hover_stale) {
+            self.hovered = self.pointer.and_then(|p| self.hit_test(p));
+        }
         if self.sim.is_active() && !self.vis.bodies.is_empty() {
             let reduce_motion = cx.reduce_motion();
             let vis = &mut self.vis;
