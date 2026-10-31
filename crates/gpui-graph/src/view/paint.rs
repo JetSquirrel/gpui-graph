@@ -8,7 +8,9 @@ use std::{cmp::Ordering, collections::HashSet};
 
 use super::visual::Vertex;
 use super::{Item, NetworkGraph};
-use crate::geometry::{circles_hull, draw_self_loop, segment_may_intersect, smooth_closed};
+use crate::geometry::{
+    TriangleBatch, circles_hull, draw_self_loop, segment_may_intersect, smooth_closed,
+};
 use crate::style::{GraphColors, GraphMetrics, LabelMode};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -56,17 +58,12 @@ impl NetworkGraph {
         // Edges are batched into one path per state to keep draw calls low;
         // merged edges get their own path because their width varies.
         let stroke = (1.2 * zoom.sqrt()).clamp(0.6, 2.);
-        let mut batches: Vec<(PathBuilder, PathBuilder, bool)> = [1., 1., 1.6, 2.2]
+        // Lines and arrowheads share a batch: same color, one path.
+        let mut batches: Vec<TriangleBatch> = [1., 1., 1.6, 2.2]
             .iter()
-            .map(|w| {
-                (
-                    PathBuilder::stroke(px(stroke * w)),
-                    PathBuilder::fill(),
-                    false,
-                )
-            })
+            .map(|w| TriangleBatch::new(stroke * w))
             .collect();
-        let mut bundles: Vec<(PathBuilder, PathBuilder, EdgeState)> = Vec::new();
+        let mut bundles: Vec<(TriangleBatch, EdgeState)> = Vec::new();
         let mut edge_labels = Vec::new();
 
         for (ei, e) in vis.edges.iter().enumerate() {
@@ -100,47 +97,35 @@ impl NetworkGraph {
                     } else {
                         1.4
                     };
-                (PathBuilder::stroke(px(w.min(10.))), PathBuilder::fill())
+                TriangleBatch::new(w.min(10.))
             });
-            let (path, arrows) = match &mut own {
-                Some((p, a)) => (p, a),
-                None => {
-                    let (p, a, used) = &mut batches[state as usize];
-                    *used = true;
-                    (p, a)
-                }
+            let batch = match &mut own {
+                Some(b) => b,
+                None => &mut batches[state as usize],
             };
 
             let rs = vis.bodies[e.source].radius * zoom;
             let rt = vis.bodies[e.target].radius * zoom;
             if e.source == e.target {
-                draw_self_loop(path, a, rs);
+                draw_self_loop(batch, a, rs);
             } else {
                 let arrow = (6. + stroke * 2.) * width_scale.sqrt();
                 let gap = if self.arrows { rt + arrow } else { rt };
-                path.move_to(geom.point_from_start(rs));
-                let end = geom.point_from_end(gap);
-                match geom.ctrl {
-                    Some(ctrl) => path.curve_to(end, ctrl),
-                    None => path.line_to(end),
-                }
+                geom.stroke(batch, geom.t_from_start(rs), geom.t_from_end(gap));
                 if self.arrows && zoom > 0.25 {
                     let tip = geom.point_from_end(rt);
                     let (dx, dy) = geom.end_direction();
                     let (nx, ny) = (-dy * arrow * 0.45, dx * arrow * 0.45);
                     let (bx, by) = (tip.x.as_f32() - dx * arrow, tip.y.as_f32() - dy * arrow);
-                    arrows.add_polygon(
-                        &[
-                            tip,
-                            point(px(bx + nx), px(by + ny)),
-                            point(px(bx - nx), px(by - ny)),
-                        ],
-                        true,
+                    batch.triangle(
+                        tip,
+                        point(px(bx + nx), px(by + ny)),
+                        point(px(bx - nx), px(by - ny)),
                     );
                 }
             }
-            if let Some((p, a)) = own {
-                bundles.push((p, a, state));
+            if let Some(b) = own {
+                bundles.push((b, state));
             }
 
             let emphasized = matches!(state, EdgeState::Active | EdgeState::Selected);
@@ -166,8 +151,8 @@ impl NetworkGraph {
             colors.edge_active,
             colors.selection,
         ];
-        let paint = |path: PathBuilder, color: Hsla, window: &mut Window| {
-            if let Ok(path) = path.build() {
+        let paint = |batch: TriangleBatch, color: Hsla, window: &mut Window| {
+            if let Some(path) = batch.build() {
                 window.paint_path(path, color);
             }
         };
@@ -178,26 +163,12 @@ impl NetworkGraph {
             EdgeState::Active,
             EdgeState::Selected,
         ] {
-            for (p, a, _) in bundles.iter_mut().filter(|b| b.2 == state) {
-                paint(
-                    std::mem::replace(p, PathBuilder::fill()),
-                    edge_colors[state as usize],
-                    window,
-                );
-                paint(
-                    std::mem::replace(a, PathBuilder::fill()),
-                    edge_colors[state as usize],
-                    window,
-                );
+            let color = edge_colors[state as usize];
+            for (b, _) in bundles.iter_mut().filter(|b| b.1 == state) {
+                paint(std::mem::replace(b, TriangleBatch::new(0.)), color, window);
             }
-            let (p, a, used) = std::mem::replace(
-                &mut batches[state as usize],
-                (PathBuilder::fill(), PathBuilder::fill(), false),
-            );
-            if used {
-                paint(p, edge_colors[state as usize], window);
-                paint(a, edge_colors[state as usize], window);
-            }
+            let b = std::mem::replace(&mut batches[state as usize], TriangleBatch::new(0.));
+            paint(b, color, window);
         }
 
         // One record of drawn label areas for node and edge labels alike, so
