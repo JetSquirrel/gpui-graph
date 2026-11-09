@@ -35,10 +35,10 @@ explore a neighborhood, or `random 500` to generate a larger graph.
 
 ```toml
 [dependencies]
-gpui-graph = "0.1"
-gpui-base = "=0.8.1"
+gpui-graph = "0.2"
+gpui-base = "=0.9.1"
 # Must match the GPUI snapshot used by gpui-base.
-gpui = { package = "gpui-pre", version = "=0.3.10" }
+gpui = { package = "gpui-pre", version = "=0.3.12" }
 ```
 
 When developing inside this repository, use the workspace dependency or
