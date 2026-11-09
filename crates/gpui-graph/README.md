@@ -14,9 +14,9 @@ Force-directed network graph component for [GPUI](https://www.gpui.rs), built on
 
 ```toml
 [dependencies]
-gpui-graph = "0.1"
-gpui-base = "=0.8.1"
-gpui = { package = "gpui-pre", version = "=0.3.10" } # must match gpui-base
+gpui-graph = "0.2"
+gpui-base = "=0.9.1"
+gpui = { package = "gpui-pre", version = "=0.3.12" } # must match gpui-base
 ```
 
 ```rust

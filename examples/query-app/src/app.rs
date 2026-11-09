@@ -807,14 +807,13 @@ fn apply_theme(window: &Window, cx: &mut App) {
         window.appearance(),
         WindowAppearance::Dark | WindowAppearance::VibrantDark
     );
-    Theme::global_mut(cx).tokens = SemanticThemeTokens {
-        colors: if dark {
-            ColorTokens::dark()
-        } else {
-            ColorTokens::light()
-        },
-        ..Default::default()
+    let mut tokens = SemanticThemeTokens::default();
+    tokens.colors = if dark {
+        ColorTokens::dark()
+    } else {
+        ColorTokens::light()
     };
+    Theme::global_mut(cx).tokens = tokens;
 }
 
 /// The single default action in a region.
