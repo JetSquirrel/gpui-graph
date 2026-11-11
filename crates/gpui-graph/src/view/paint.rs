@@ -69,7 +69,15 @@ impl NetworkGraph {
         for (ei, e) in vis.edges.iter().enumerate() {
             let geom = self.edge_geometry(ei);
             let (a, b) = (geom.eval(0.), geom.eval(1.));
-            if !segment_may_intersect(visible, a, b) {
+            let rs = vis.bodies[e.source].radius * zoom;
+            let rt = vis.bodies[e.target].radius * zoom;
+            let on_screen = if e.source == e.target {
+                // The loop reaches three radii out from its node.
+                visible.dilate(px(rs.max(6.) * 3.)).contains(&a)
+            } else {
+                segment_may_intersect(visible, a, b)
+            };
+            if !on_screen {
                 continue;
             }
             let state = if selected == Some(Item::Edge(ei)) {
@@ -104,8 +112,6 @@ impl NetworkGraph {
                 None => &mut batches[state as usize],
             };
 
-            let rs = vis.bodies[e.source].radius * zoom;
-            let rt = vis.bodies[e.target].radius * zoom;
             if e.source == e.target {
                 draw_self_loop(batch, a, rs);
             } else {
@@ -179,7 +185,8 @@ impl NetworkGraph {
         for (v, b) in vis.bodies.iter().enumerate() {
             let c = self.to_screen(b.pos);
             let r = b.radius * zoom;
-            if !visible.contains(&c) && r < 200. {
+            // By its edge, not its center: a big node stays until it is all out.
+            if !visible.dilate(px(r)).contains(&c) {
                 continue;
             }
             let base = self.vertex_color(v, cx);
@@ -490,16 +497,24 @@ impl NetworkGraph {
                 .default_tooltip(item, colors, metrics, cx)
                 .into_any_element(),
         };
-        let origin = self.bounds.get().origin;
+        // Beside the pointer, on the side with more room, so the tooltip is
+        // not clipped at the right and bottom edges.
+        let bounds = self.bounds.get();
+        let (x, y) = (pointer.x - bounds.left(), pointer.y - bounds.top());
+        let (w, h) = (bounds.size.width, bounds.size.height);
         let offset = metrics.space_md;
-        Some(
-            div()
-                .absolute()
-                .left(pointer.x - origin.x + offset)
-                .top(pointer.y - origin.y + offset)
-                .child(content)
-                .into_any_element(),
-        )
+        let tip = div().absolute();
+        let tip = if x > w * 0.6 {
+            tip.right(w - x + offset)
+        } else {
+            tip.left(x + offset)
+        };
+        let tip = if y > h * 0.7 {
+            tip.bottom(h - y + offset)
+        } else {
+            tip.top(y + offset)
+        };
+        Some(tip.child(content).into_any_element())
     }
 
     fn default_tooltip(
@@ -522,14 +537,14 @@ impl NetworkGraph {
                             Some(self.vertex_color(v, cx)),
                             kicker.into(),
                             node.label.clone(),
-                            format!("{} relationships", self.degrees[i]),
+                            counted(self.degrees[i], "relationship"),
                         )
                     }
                     Vertex::Group(g) => (
                         Some(self.group_color(g)),
                         "Group".into(),
                         self.groups[g].label.clone(),
-                        format!("{} members", self.groups[g].members.len()),
+                        counted(self.groups[g].members.len(), "member"),
                     ),
                 },
                 Item::Edge(e) => {
@@ -577,6 +592,11 @@ impl NetworkGraph {
             .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
             .child(div().text_color(colors.muted).child(detail))
     }
+}
+
+/// "1 member", "3 members".
+fn counted(n: usize, noun: &str) -> String {
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
 }
 
 fn circle(c: Point<Pixels>, r: f32) -> Bounds<Pixels> {

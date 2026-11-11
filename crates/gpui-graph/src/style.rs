@@ -166,7 +166,8 @@ impl NodeSizing {
 pub enum LabelMode {
     /// Only the hovered / selected node and its neighbors.
     Focus,
-    /// Every node once the zoom makes labels readable; focus set otherwise.
+    /// As many labels as fit without overlapping, best connected nodes
+    /// first; zooming in makes room for more.
     #[default]
     Auto,
     Always,
