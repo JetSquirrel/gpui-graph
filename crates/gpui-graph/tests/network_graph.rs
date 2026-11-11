@@ -257,3 +257,124 @@ fn keyboard_navigation_selects_activates_and_clears(cx: &mut TestAppContext) {
     cx.dispatch_action(ClearSelection);
     graph.read_with(cx, |g, _| assert!(matches!(g.selection(), Selection::None)));
 }
+
+#[gpui::test]
+fn removing_a_selected_edges_node_reports_the_lost_selection(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, point};
+
+    cx.update(gpui_base::init);
+    let data = GraphData::new(
+        vec![Node::new("a", "A", "X"), Node::new("b", "B", "X")],
+        vec![Edge::new("a", "b", "R")],
+    );
+    let (graph, cx) = cx.add_window_view(|_, cx| NetworkGraph::new(cx).with_data(data));
+    settle(&graph, cx);
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let sink = events.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&graph, move |_, e: &NetworkGraphEvent, _| {
+            sink.borrow_mut().push(e.clone())
+        })
+        .detach();
+    });
+
+    // Two nodes settle either side of the view's center: the edge crosses it.
+    let center = cx.update(|window, _| {
+        let s = window.viewport_size();
+        point(s.width / 2., s.height / 2.)
+    });
+    cx.simulate_mouse_down(center, MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(center, MouseButton::Left, Modifiers::default());
+    graph.read_with(cx, |g, _| {
+        assert!(matches!(g.selection(), Selection::Edge(e) if e.label.as_ref() == "R"))
+    });
+
+    graph.update(cx, |g, cx| g.remove_nodes(&["b"], cx));
+    graph.read_with(cx, |g, _| assert!(matches!(g.selection(), Selection::None)));
+    assert!(matches!(
+        events.borrow().last(),
+        Some(NetworkGraphEvent::SelectionChanged(Selection::None))
+    ));
+}
+
+#[gpui::test]
+fn data_arriving_mid_drag_ends_the_drag(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, point, px};
+
+    cx.update(gpui_base::init);
+    let data = GraphData::new(vec![Node::new("a", "A", "X")], vec![]);
+    let (graph, cx) = cx.add_window_view(|_, cx| NetworkGraph::new(cx).with_data(data));
+    settle(&graph, cx);
+
+    // A lone node is fitted to the center of the view.
+    let center = cx.update(|window, _| {
+        let s = window.viewport_size();
+        point(s.width / 2., s.height / 2.)
+    });
+    cx.simulate_mouse_down(center, MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(
+        center + point(px(60.), px(0.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    graph.read_with(cx, |g, _| assert!(g.is_pinned("a"), "held by the drag"));
+
+    graph.update(cx, |g, cx| {
+        g.merge(
+            GraphData::new(vec![Node::new("b", "B", "X")], vec![]),
+            Some("a"),
+            cx,
+        )
+    });
+    graph.read_with(cx, |g, _| assert!(!g.is_pinned("a"), "released"));
+    settle(&graph, cx);
+}
+
+/// Render frames until the layout stops moving.
+fn settle(graph: &gpui::Entity<NetworkGraph>, cx: &mut gpui::VisualTestContext) {
+    for _ in 0..1000 {
+        graph.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        if !graph.read_with(cx, |g, _| g.is_simulating()) {
+            return;
+        }
+    }
+    panic!("the layout never settled");
+}
+
+#[gpui::test]
+fn duplicate_edges_in_one_batch_are_loaded_once(cx: &mut TestAppContext) {
+    let data = GraphData::new(
+        vec![Node::new("a", "A", "X"), Node::new("b", "B", "X")],
+        vec![
+            Edge::new("a", "b", "R"),
+            Edge::new("a", "b", "R"),
+            Edge::new("a", "b", "S"),
+            Edge::new("b", "a", "R"),
+        ],
+    );
+    let graph = cx.new(|cx| NetworkGraph::new(cx).with_data(data));
+    graph.read_with(cx, |g, _| assert_eq!(g.edge_count(), 3));
+}
+
+#[gpui::test]
+fn colors_survive_removing_another_group_or_category(cx: &mut TestAppContext) {
+    let graph = cx.new(|cx| NetworkGraph::new(cx).with_data(communities()));
+    graph.update(cx, |g, cx| {
+        let category_q = g.categories()[1].color;
+
+        // Group A and category P (the first of each) lose all their nodes.
+        g.remove_nodes(&["a1", "a2", "a3", "b1", "b2"], cx);
+        let cats = g.categories();
+        assert_eq!(cats.len(), 1, "empty categories are not listed");
+        assert_eq!((cats[0].name.as_ref(), cats[0].color), ("Q", category_q));
+    });
+
+    let graph = cx.new(|cx| NetworkGraph::new(cx).with_data(communities()));
+    graph.update(cx, |g, cx| {
+        let group_b = g.group("B").unwrap().color;
+        g.remove_nodes(&["a1", "a2", "a3"], cx);
+        assert_eq!(g.groups().len(), 1);
+        assert_eq!(g.group("B").unwrap().color, group_b);
+    });
+}

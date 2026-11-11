@@ -13,8 +13,8 @@ use gpui::{
     AnyElement, App, Bounds, ContentMask, Context, CursorStyle, DispatchPhase, Entity,
     EventEmitter, FocusHandle, Focusable, Hitbox, HitboxBehavior, Hsla, InteractiveElement as _,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
-    PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollEvent, SharedString, Styled as _, Window,
-    canvas, div, point, px,
+    PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollEvent, SharedString, Size, Styled as _,
+    Window, canvas, div, point, px,
 };
 
 use crate::actions::{
@@ -122,6 +122,9 @@ struct GroupState {
     label: SharedString,
     members: Vec<usize>,
     collapsed: bool,
+    /// Palette slot, kept for the group's lifetime so other groups coming
+    /// and going do not recolor it.
+    color_slot: usize,
     /// Super node body while collapsed.
     body: Body,
     /// Members' centroid when collapsed; expanding moves them by the super node's travel.
@@ -159,8 +162,13 @@ pub struct NetworkGraph {
     index: HashMap<SharedString, usize>,
     degrees: Vec<usize>,
     neighbors: Vec<Vec<usize>>,
+    /// Every category seen since the last load, in order of first appearance.
+    /// A category's position is its palette slot, so one that loses its last
+    /// node stays listed here and the others keep their colors.
     categories: Vec<SharedString>,
     groups: Vec<GroupState>,
+    /// Palette slot for the next new group.
+    next_group_color: usize,
     group_index: HashMap<SharedString, usize>,
     node_group: Vec<Option<usize>>,
 
@@ -174,10 +182,10 @@ pub struct NetworkGraph {
     /// Keep fitting the view while the layout settles, until the user moves it.
     auto_fit: bool,
     bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// Size of the bounds the view was last fitted to; a resize fits again.
+    fit_size: Size<Pixels>,
 
     hovered: Option<Item>,
-    /// The pointer moved since `hovered` was last hit-tested.
-    hover_stale: bool,
     selected: Option<SelectionKey>,
     drag: Option<Drag>,
     pointer: Option<Point<Pixels>>,
@@ -222,6 +230,7 @@ impl NetworkGraph {
             neighbors: Vec::new(),
             categories: Vec::new(),
             groups: Vec::new(),
+            next_group_color: 0,
             group_index: HashMap::new(),
             node_group: Vec::new(),
             vis: Visual::default(),
@@ -230,8 +239,8 @@ impl NetworkGraph {
             zoom: 1.,
             auto_fit: true,
             bounds: Rc::new(Cell::new(Bounds::default())),
+            fit_size: Size::default(),
             hovered: None,
-            hover_stale: false,
             selected: None,
             drag: None,
             pointer: None,
@@ -436,6 +445,7 @@ impl NetworkGraph {
     /// ids are kept; new nodes start around `anchor` so the layout stays stable.
     /// New members of a collapsed group join it without expanding it.
     pub fn merge(&mut self, data: GraphData, anchor: Option<&str>, cx: &mut Context<Self>) {
+        self.cancel_drag();
         self.sync_back();
         self.insert(data, anchor);
         cx.notify();
@@ -443,14 +453,16 @@ impl NetworkGraph {
 
     /// Remove nodes and every edge touching them.
     pub fn remove_nodes(&mut self, ids: &[&str], cx: &mut Context<Self>) {
+        let ids: HashSet<&str> = ids.iter().copied().collect();
         let doomed: Vec<bool> = self
             .nodes
             .iter()
-            .map(|n| ids.contains(&n.id.as_ref()))
+            .map(|n| ids.contains(n.id.as_ref()))
             .collect();
         if !doomed.contains(&true) {
             return;
         }
+        self.cancel_drag();
         self.sync_back();
         let mut remap = vec![usize::MAX; self.nodes.len()];
         let mut kept = 0;
@@ -476,11 +488,10 @@ impl NetworkGraph {
             .enumerate()
             .map(|(i, n)| (n.id.clone(), i))
             .collect();
-        self.categories
-            .retain(|c| self.nodes.iter().any(|n| &n.category == c));
         // Model edge indices shifted; an edge selection cannot be carried over.
         if matches!(self.selected, Some(SelectionKey::Edges(_))) {
             self.selected = None;
+            cx.emit(NetworkGraphEvent::SelectionChanged(Selection::None));
         }
         self.rebuild();
         self.sim.reheat(0.3);
@@ -501,12 +512,14 @@ impl NetworkGraph {
     }
 
     fn load(&mut self, data: GraphData) {
+        self.cancel_drag();
         self.nodes.clear();
         self.node_bodies.clear();
         self.edges.clear();
         self.index.clear();
         self.categories.clear();
         self.groups.clear();
+        self.next_group_color = 0;
         self.group_index.clear();
         self.vis = Visual::default();
         self.hovered = None;
@@ -516,6 +529,23 @@ impl NetworkGraph {
         self.pan = Point::default();
         self.zoom = 1.;
         self.auto_fit = true;
+    }
+
+    /// Abandon a drag in progress, before the vertex indices it holds go
+    /// stale. Releases the dragged vertex as a mouse-up would, and lets the
+    /// layout cool down again.
+    fn cancel_drag(&mut self) {
+        if let Some(Drag {
+            kind: DragKind::Vertex { ix, was_pinned },
+            moved: true,
+            ..
+        }) = self.drag.take()
+            && !(self.sticky_drag || was_pinned)
+            && let Some(body) = self.vis.bodies.get_mut(ix)
+        {
+            body.fixed = None;
+        }
+        self.sim.alpha_target = 0.;
     }
 
     /// Requires the model to be in sync with the visual graph (see `sync_back`).
@@ -546,16 +576,17 @@ impl NetworkGraph {
             None => Simulation::initialize_positions(&mut self.node_bodies, first_new),
         }
 
+        let mut seen: HashSet<(usize, usize, SharedString)> = self
+            .edges
+            .iter()
+            .map(|e| (e.source, e.target, e.data.label.clone()))
+            .collect();
         for edge in data.edges {
             let (Some(&s), Some(&t)) = (self.index.get(&edge.source), self.index.get(&edge.target))
             else {
                 continue;
             };
-            let duplicate = self
-                .edges
-                .iter()
-                .any(|e| e.source == s && e.target == t && e.data.label == edge.label);
-            if !duplicate {
+            if seen.insert((s, t, edge.label.clone())) {
                 self.edges.push(ModelEdge {
                     data: edge,
                     source: s,
@@ -596,9 +627,12 @@ impl NetworkGraph {
             list.dedup();
         }
         for (i, body) in self.node_bodies.iter_mut().enumerate() {
+            // A radius from data can be anything; keep it drawable.
             body.radius = self.nodes[i]
                 .size
-                .unwrap_or_else(|| self.sizing.radius(self.degrees[i]));
+                .filter(|r| r.is_finite())
+                .unwrap_or_else(|| self.sizing.radius(self.degrees[i]))
+                .max(1.);
         }
 
         // Groups keep their state (collapsed, position, label) across rebuilds.
@@ -609,11 +643,14 @@ impl NetworkGraph {
         for (i, node) in self.nodes.iter().enumerate() {
             let Some(id) = &node.group else { continue };
             let g = *self.group_index.entry(id.clone()).or_insert_with(|| {
+                let color_slot = self.next_group_color;
+                self.next_group_color += 1;
                 self.groups.push(GroupState {
                     id: id.clone(),
                     label: id.clone(),
                     members: Vec::new(),
                     collapsed: false,
+                    color_slot,
                     body: Body::default(),
                     anchor: Vec2::default(),
                 });
@@ -697,13 +734,19 @@ impl NetworkGraph {
     }
 
     pub fn categories(&self) -> Vec<CategoryInfo> {
+        let mut counts: HashMap<&SharedString, usize> = HashMap::new();
+        for node in &self.nodes {
+            *counts.entry(&node.category).or_default() += 1;
+        }
         self.categories
             .iter()
             .enumerate()
-            .map(|(i, c)| CategoryInfo {
-                name: c.clone(),
-                color: self.palette.get(i),
-                count: self.nodes.iter().filter(|n| &n.category == c).count(),
+            .filter_map(|(i, c)| {
+                Some(CategoryInfo {
+                    name: c.clone(),
+                    color: self.palette.get(i),
+                    count: *counts.get(c)?,
+                })
             })
             .collect()
     }
@@ -793,7 +836,7 @@ impl NetworkGraph {
     }
 
     fn group_color(&self, g: usize) -> Hsla {
-        self.palette.get(g)
+        self.palette.get(self.groups[g].color_slot)
     }
 
     fn edge_selection(&self, edges: &[usize]) -> Selection {
@@ -964,6 +1007,7 @@ impl NetworkGraph {
         if targets.is_empty() {
             return;
         }
+        self.cancel_drag();
         self.sync_back();
         for &g in &targets {
             let members = self.groups[g].members.clone();
@@ -1022,7 +1066,12 @@ impl NetworkGraph {
         cx.notify();
     }
 
+    /// Zoom around the viewport center. `factor` above 1 zooms in; a factor
+    /// that is not a positive number is ignored.
     pub fn zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
+        if !(factor.is_finite() && factor > 0.) {
+            return;
+        }
         self.auto_fit = false;
         let center = self.bounds.get().center();
         self.zoom_around(center, factor);
@@ -1031,6 +1080,7 @@ impl NetworkGraph {
 
     /// Restart the layout from scratch (d3 `simulation.alpha(1).restart()`).
     pub fn relayout(&mut self, cx: &mut Context<Self>) {
+        self.cancel_drag();
         for b in &mut self.vis.bodies {
             b.fixed = None;
         }
@@ -1040,11 +1090,14 @@ impl NetworkGraph {
         cx.notify();
     }
 
+    /// Move the viewport toward showing everything; `blend` 1 jumps there.
+    /// Does nothing until the graph has been laid out on screen once.
     fn apply_fit(&mut self, blend: f32) {
         let bounds = self.bounds.get();
         if self.vis.bodies.is_empty() || bounds.size.width <= px(0.) {
             return;
         }
+        self.fit_size = bounds.size;
         let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
         for b in &self.vis.bodies {
             x0 = x0.min(b.pos.x - b.radius);
@@ -1285,6 +1338,11 @@ impl NetworkGraph {
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, inside: bool, cx: &mut Context<Self>) {
         self.pointer = inside.then_some(ev.position);
+        // The button went up where no mouse-up reached us, e.g. outside the window.
+        if self.drag.is_some() && ev.pressed_button != Some(MouseButton::Left) {
+            self.cancel_drag();
+            cx.notify();
+        }
         if let Some(drag) = &mut self.drag {
             let delta = ev.position - drag.start;
             if !drag.moved {
@@ -1315,7 +1373,6 @@ impl NetworkGraph {
         // once per frame, in `render`, at the latest position. Re-render
         // while hovering, too, so the tooltip follows the pointer.
         if inside || self.hovered.is_some() {
-            self.hover_stale = true;
             cx.notify();
         }
     }
@@ -1369,9 +1426,6 @@ impl NetworkGraph {
 
 impl Render for NetworkGraph {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if std::mem::take(&mut self.hover_stale) {
-            self.hovered = self.pointer.and_then(|p| self.hit_test(p));
-        }
         if self.sim.is_active() && !self.vis.bodies.is_empty() {
             let reduce_motion = cx.reduce_motion();
             let vis = &mut self.vis;
@@ -1403,6 +1457,16 @@ impl Render for NetworkGraph {
             if self.sim.is_active() {
                 window.request_animation_frame();
             }
+        } else if self.auto_fit && self.bounds.get().size != self.fit_size {
+            // First layout on screen (the bounds are unknown until a frame
+            // has been painted, which is too late for a layout that settled
+            // within that frame) or a resize.
+            self.apply_fit(1.);
+        }
+        // Whatever is under a resting pointer changes as the layout moves,
+        // the view pans or zooms, or the graph is rebuilt.
+        if self.drag.is_none() {
+            self.hovered = self.pointer.and_then(|p| self.hit_test(p));
         }
 
         let colors = self.resolved_colors(cx);
@@ -1410,6 +1474,7 @@ impl Render for NetworkGraph {
         let tooltip = self.tooltip_element(&colors, &metrics, window, cx);
         let entity = cx.entity();
         let bounds_cell = self.bounds.clone();
+        let auto_fit = self.auto_fit;
         let background = colors.background;
         let show_focus = self.keyboard_nav && self.focus_handle.is_focused(window);
 
@@ -1434,6 +1499,10 @@ impl Render for NetworkGraph {
             .child(
                 canvas(
                     move |bounds, window, _| {
+                        if auto_fit && bounds_cell.get().size != bounds.size {
+                            // Render again to fit the new size.
+                            window.request_animation_frame();
+                        }
                         bounds_cell.set(bounds);
                         window.insert_hitbox(bounds, HitboxBehavior::Normal)
                     },
