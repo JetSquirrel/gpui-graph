@@ -182,123 +182,135 @@ impl NetworkGraph {
         let mut placed = LabelGrid::default();
         // Vertices, then labels above all of them.
         let mut labels = Vec::new();
-        for (v, b) in vis.bodies.iter().enumerate() {
-            let c = self.to_screen(b.pos);
-            let r = b.radius * zoom;
-            // By its edge, not its center: a big node stays until it is all out.
-            if !visible.dilate(px(r)).contains(&c) {
-                continue;
-            }
-            let base = self.vertex_color(v, cx);
-            let faded = !in_focus(v);
-            let is_selected = selected == Some(Item::Vertex(v));
-            let is_hovered = self.hovered == Some(Item::Vertex(v));
-            let is_group = matches!(vis.vertices[v], Vertex::Group(_));
-            let rr = r + if is_hovered { 2. } else { 0. };
-
-            if is_selected || is_hovered {
-                let halo = rr + 6.;
-                window.paint_quad(
-                    gpui::fill(circle(c, halo), base.opacity(0.25)).corner_radii(px(halo)),
-                );
-            }
-            if is_group {
-                // A second, outer ring marks a collapsed group.
-                let outer = rr + 3.;
-                let ring_color = if faded {
-                    base.opacity(0.3)
-                } else {
-                    base.opacity(0.6)
-                };
-                window.paint_quad(quad(
-                    circle(c, outer),
-                    px(outer),
-                    gpui::transparent_black(),
-                    px(1.5),
-                    ring_color,
-                    BorderStyle::Solid,
-                ));
-            }
-            let ring = if is_selected {
-                (r * 0.18).clamp(2., 4.)
-            } else {
-                (r * 0.12).clamp(1., 2.)
-            };
-            let border = if is_selected {
-                colors.selection
-            } else if faded {
-                colors.background.opacity(0.4)
-            } else {
-                colors.background
-            };
-            let fill = if faded { base.opacity(0.4) } else { base };
-            window.paint_quad(quad(
-                circle(c, rr),
-                px(rr),
-                fill,
-                px(ring),
-                border,
-                BorderStyle::Solid,
-            ));
-            if show_focus && is_selected {
-                // Keyboard focus gets its own ring outside the selection ring.
-                let f = rr + if is_group { 7. } else { 4. };
-                window.paint_quad(quad(
-                    circle(c, f),
-                    px(f),
-                    gpui::transparent_black(),
-                    px(2.),
-                    colors.focus_ring,
-                    BorderStyle::Solid,
-                ));
-            }
-
-            match vis.vertices[v] {
-                Vertex::Group(g) if rr > 8. => {
-                    let text: SharedString = self.groups[g].members.len().to_string().into();
-                    let font = px((rr * 0.6).clamp(9., 18.));
-                    let on_fill = colors.on_fill(base).opacity(if faded { 0.6 } else { 1. });
-                    let line = shape(&text, font, on_fill, window);
-                    let origin = point(c.x - line.width / 2., c.y - font * 0.6);
-                    let _ = line.paint(origin, font * 1.2, TextAlign::Left, None, window, cx);
+        // Group sizes are text, which a layer draws above all its quads: they
+        // are painted after it so a node on top still covers them.
+        let mut group_counts = Vec::new();
+        // One layer for every node: GPUI 0.3.14 splits each rounded quad
+        // into five primitives, and inserting each one into the scene's
+        // bounds tree cost more than the rest of the frame. Quads within a
+        // layer keep their paint order, so overlapping nodes stack as before.
+        window.paint_layer(|window| {
+            for (v, b) in vis.bodies.iter().enumerate() {
+                let c = self.to_screen(b.pos);
+                let r = b.radius * zoom;
+                // By its edge, not its center: a big node stays until it is all out.
+                if !visible.dilate(px(r)).contains(&c) {
+                    continue;
                 }
-                Vertex::Node(_) if b.fixed.is_some() && rr > 6. => {
-                    // Small pin marker for nodes that will not move with the layout.
-                    let pin = (rr * 0.22).clamp(2., 4.);
+                let base = self.vertex_color(v, cx);
+                let faded = !in_focus(v);
+                let is_selected = selected == Some(Item::Vertex(v));
+                let is_hovered = self.hovered == Some(Item::Vertex(v));
+                let is_group = matches!(vis.vertices[v], Vertex::Group(_));
+                let rr = r + if is_hovered { 2. } else { 0. };
+
+                if is_selected || is_hovered {
+                    let halo = rr + 6.;
                     window.paint_quad(
-                        gpui::fill(circle(c, pin), colors.background.opacity(0.9))
-                            .corner_radii(px(pin)),
+                        gpui::fill(circle(c, halo), base.opacity(0.25)).corner_radii(px(halo)),
                     );
                 }
-                _ => {}
-            }
+                if is_group {
+                    // A second, outer ring marks a collapsed group.
+                    let outer = rr + 3.;
+                    let ring_color = if faded {
+                        base.opacity(0.3)
+                    } else {
+                        base.opacity(0.6)
+                    };
+                    window.paint_quad(quad(
+                        circle(c, outer),
+                        px(outer),
+                        gpui::transparent_black(),
+                        px(1.5),
+                        ring_color,
+                        BorderStyle::Solid,
+                    ));
+                }
+                let ring = if is_selected {
+                    (r * 0.18).clamp(2., 4.)
+                } else {
+                    (r * 0.12).clamp(1., 2.)
+                };
+                let border = if is_selected {
+                    colors.selection
+                } else if faded {
+                    colors.background.opacity(0.4)
+                } else {
+                    colors.background
+                };
+                let fill = if faded { base.opacity(0.4) } else { base };
+                window.paint_quad(quad(
+                    circle(c, rr),
+                    px(rr),
+                    fill,
+                    px(ring),
+                    border,
+                    BorderStyle::Solid,
+                ));
+                if show_focus && is_selected {
+                    // Keyboard focus gets its own ring outside the selection ring.
+                    let f = rr + if is_group { 7. } else { 4. };
+                    window.paint_quad(quad(
+                        circle(c, f),
+                        px(f),
+                        gpui::transparent_black(),
+                        px(2.),
+                        colors.focus_ring,
+                        BorderStyle::Solid,
+                    ));
+                }
 
-            let show_label = match self.label_mode {
-                LabelMode::Never => false,
-                _ if is_group => true,
-                LabelMode::Always => true,
-                // At any zoom: the overlap check below keeps the labels that
-                // fit, biggest (best connected) nodes first, so a dense graph
-                // shows its hubs by name and zooming in names the rest.
-                LabelMode::Auto => !faded,
-                LabelMode::Focus => focus.is_some() && !faded,
-            };
-            let text = match vis.vertices[v] {
-                Vertex::Node(i) => self.nodes[i].label.clone(),
-                Vertex::Group(g) => self.groups[g].label.clone(),
-            };
-            if show_label && !text.is_empty() {
-                labels.push(LabelCandidate {
-                    vertex: v,
-                    center: c,
-                    radius: rr,
-                    text,
-                    faded,
-                    emphasized: is_selected || is_hovered || is_group,
-                    // A faded group label must not crowd out the focused nodes' labels.
-                    forced: is_selected || is_hovered || (is_group && !faded),
-                });
+                match vis.vertices[v] {
+                    Vertex::Group(g) if rr > 8. => {
+                        let text: SharedString = self.groups[g].members.len().to_string().into();
+                        let font = px((rr * 0.6).clamp(9., 18.));
+                        let on_fill = colors.on_fill(base).opacity(if faded { 0.6 } else { 1. });
+                        let line = shape(&text, font, on_fill, window);
+                        let origin = point(c.x - line.width / 2., c.y - font * 0.6);
+                        group_counts.push((line, origin, font * 1.2));
+                    }
+                    Vertex::Node(_) if b.fixed.is_some() && rr > 6. => {
+                        // Small pin marker for nodes that will not move with the layout.
+                        let pin = (rr * 0.22).clamp(2., 4.);
+                        window.paint_quad(
+                            gpui::fill(circle(c, pin), colors.background.opacity(0.9))
+                                .corner_radii(px(pin)),
+                        );
+                    }
+                    _ => {}
+                }
+
+                let show_label = match self.label_mode {
+                    LabelMode::Never => false,
+                    _ if is_group => true,
+                    LabelMode::Always => true,
+                    // At any zoom: the overlap check below keeps the labels that
+                    // fit, biggest (best connected) nodes first, so a dense graph
+                    // shows its hubs by name and zooming in names the rest.
+                    LabelMode::Auto => !faded,
+                    LabelMode::Focus => focus.is_some() && !faded,
+                };
+                let text = match vis.vertices[v] {
+                    Vertex::Node(i) => self.nodes[i].label.clone(),
+                    Vertex::Group(g) => self.groups[g].label.clone(),
+                };
+                if show_label && !text.is_empty() {
+                    labels.push(LabelCandidate {
+                        vertex: v,
+                        center: c,
+                        radius: rr,
+                        text,
+                        faded,
+                        emphasized: is_selected || is_hovered || is_group,
+                        // A faded group label must not crowd out the focused nodes' labels.
+                        forced: is_selected || is_hovered || (is_group && !faded),
+                    });
+                }
             }
+        });
+        for (line, origin, line_height) in group_counts {
+            let _ = line.paint(origin, line_height, TextAlign::Left, None, window, cx);
         }
 
         // Labels follow the theme's type scale, growing slightly with zoom.
