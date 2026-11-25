@@ -20,7 +20,7 @@ fn main() {
         .detach();
 
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
+            window_bounds: Some(WindowBounds::centered(None, size(px(1280.), px(820.)), cx)),
             ..Default::default()
         };
         cx.open_window(options, |window, cx| {
