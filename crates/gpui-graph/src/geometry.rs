@@ -1,6 +1,4 @@
-use gpui::{
-    Bounds, FillOptions, FillRule, Path, PathBuilder, PathStyle, Pixels, Point, point, px,
-};
+use gpui::{Bounds, FillOptions, FillRule, Path, PathBuilder, PathStyle, Pixels, Point, point, px};
 
 pub(crate) fn segment_may_intersect(b: Bounds<Pixels>, p: Point<Pixels>, q: Point<Pixels>) -> bool {
     let (x0, x1) = (p.x.min(q.x), p.x.max(q.x));
