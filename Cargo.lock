@@ -2067,7 +2067,7 @@ dependencies = [
 
 [[package]]
 name = "gpui-graph"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "gpui-base",
  "gpui-pre",
