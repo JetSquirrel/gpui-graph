@@ -70,7 +70,7 @@ fn main() {
         gpui_base::init(cx);
         gpui_graph::init(cx);
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(800.), px(600.)), cx)),
+            window_bounds: Some(WindowBounds::centered(None, size(px(800.), px(600.)), cx)),
             ..Default::default()
         };
         cx.open_window(options, |_, cx| cx.new(Example::new))
